@@ -1,0 +1,15 @@
+# Survey area for a real-boat run (docs/SURVEY_AREA_FORMAT.md).
+# Same keys as a simulator world's metadata.yaml (blueboat_world_meta/1): geo_anchor + limits.
+# geo_anchor is the map datum. corners_gps must agree with limits.local within 0.05 m through the
+# project's equirectangular pair (latlon_to_local_en, R = 6378137.0).
+# EXAMPLE VALUES ONLY: replace with the site's area (a configuration tool will write this file).
+format: blueboat_survey_area/1
+name: example_harbour
+geo_anchor: {lat0: 33.89, lon0: 130.88, theta_deg: 0.0}
+limits:
+  local: {x_min: -20.0, y_min: -10.0, x_max: 80.0, y_max: 50.0}
+  corners_gps:   # SW, SE, NE, NW  [lat, lon]
+    - [33.8899101685, 130.8797835671]
+    - [33.8899101685, 130.8808657317]
+    - [33.8904491576, 130.8808657317]
+    - [33.8904491576, 130.8797835671]

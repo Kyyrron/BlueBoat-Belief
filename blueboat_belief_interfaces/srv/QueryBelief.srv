@@ -1,0 +1,20 @@
+# Disc query on the current belief (docs/MATH.md, disc query). Convenience only: everything it
+# returns can be recomputed from BeliefGrid.
+float64 x                                 # disc centre, map frame [m]
+float64 y
+float64 radius_m
+---
+bool ok
+string error
+uint32 grid_seq
+float32 p_any                             # 1 - prod(1-p_bg) * prod(1 - p_c m_c), m_c = contact mass in the disc
+float32 expected_count
+float32 coverage_mean
+float32 coverage_min
+uint32 observed_cells                     # cells in the disc with at least one look
+uint32 total_cells                        # cells in the disc inside the survey area
+uint8 min_aspects
+uint8 max_aspects
+string[] class_names
+float32[] class_distribution
+uint32[] contact_uids
