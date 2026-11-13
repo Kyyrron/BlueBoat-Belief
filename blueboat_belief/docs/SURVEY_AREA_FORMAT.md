@@ -1,6 +1,6 @@
 # Survey-area file format (`blueboat_survey_area/1`)
 
-Owner decision D-4 (2026-11-04). Belief needs one survey area, which is also its map datum. In
+Owner decision D-4 (`DESIGN.md` §1). Belief needs one survey area, which is also its map datum. In
 simulation it comes from the world's `metadata.yaml`. On the real boat it comes from a file of
 **the same shape**. This page is the specification a future configuration tool must produce.
 
@@ -56,16 +56,20 @@ Any other top-level key is refused, by name. Example: `config/survey_area.exampl
     point.
   - The fit then recovers the odom origin with σ ≈ 0.4 m.
 
-## The minimal tool (built 2026-11-04)
+## The minimal tool
 
 ```bash
 blueboat-belief-make-area --out harbour_east.yaml --anchor 33.89 130.88 --local -20 -10 80 50 --name harbour_east
 blueboat-belief-make-area --out sim_area.yaml --from-world ~/worlds/<path>/<world>
+blueboat-belief-make-area --out area.yaml --from-mission <replanner mission.yaml> [--margin-m M] [--anchor LAT LON]
 ```
+
+(Installed under `lib/blueboat_belief`: call them as `ros2 run blueboat_belief blueboat-belief-make-area …`.)
 
 It computes `corners_gps` with the project pair and validates through the same reader Belief
 uses. It creates the file exclusively (exit 1 if it exists, exit 2 if invalid). `--from-world`
-copies only `geo_anchor` and `limits`.
+copies only `geo_anchor` and `limits`; `--from-mission` takes the bounding rectangle of a
+Replanner mission's WGS-84 polygon, so the two modules never type the area twice.
 
 ## For the future configuration tool
 

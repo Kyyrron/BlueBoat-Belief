@@ -47,7 +47,7 @@ CONTACT_FIELDS: Dict[str, str] = {
     "look_bearings_deg": "float32[]", "look_ranges_m": "float32[]", "look_detected": "bool[]",
     "detection_ids": "string[]",
 }
-# fields added to belief_grid/0 by this producer (CONTRACT_DEVIATIONS.md D-C4, D-C5)
+# fields added to belief_grid/0 by this producer (docs/topics.md §10, D-C4, D-C5)
 ADDED_FIELDS = {"area_x", "area_y", "look_detected"}
 
 
@@ -63,9 +63,14 @@ def model_params(b: Belief) -> dict:
                       "fold_opposite": c.rho.fold_opposite, "ordering": c.rho.ordering},
         "base_rate": c.detector.base_rate,
         "detector_calibrated": c.detector.calibrated,
+        # what Perception's newest image record says (null: no record seen); MATH §8.2
+        "detector_calibrated_observed": b.observed_calibrated,
         "look_timeout_s": c.look.timeout_s,
         "prior_p0": b.grid.p0,
         "negative_evidence": "gated" if c.coverage.require_detector else "ungated",
+        # where "the detector covered this ping" comes from right now; MATH §8
+        "coverage_source": ("none" if not c.coverage.require_detector
+                            else "records" if b.records_mode else "arrays"),
         "turn_gating": {"enabled": c.turn.enabled, "window_s": c.turn.window_s,
                         "min_speed_mps": c.turn.min_speed_mps,
                         "min_yaw_rate_rad_s": c.turn.min_yaw_rate_rad_s},

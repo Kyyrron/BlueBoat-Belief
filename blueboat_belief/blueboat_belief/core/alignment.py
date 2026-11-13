@@ -2,7 +2,7 @@
 
 A translation-only median fit of GPS-fix <-> odom pairs (the MCS ``GeoFit`` model), latched once
 valid; or an explicit override (the GPS of odom (0, 0)). Yaw is 0: the real-boat odom yaw is
-absolute ENU (``robot_interface.py:627-639``; runtime check LOCAL_CHECKLIST L-1).
+absolute ENU (``robot_interface.py:627-639``; runtime check: TODO real-boat check L-1).
 """
 
 from __future__ import annotations

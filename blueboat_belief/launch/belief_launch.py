@@ -5,9 +5,10 @@
 
 - ``use_sim_time``: true under Gazebo, false on the real boat. Zero stamps there are replaced by
   the node clock (docs/topics.md).
-- ``record_inputs:=true`` (owner decision Q-12) also runs ``ros2 bag record`` of Belief's four
-  input topics into ``<root>/data/Belief_data/<stamp>-inputs``. Control's run bag excludes the
-  sonar topics, so this recording is what an offline replay (``blueboat-belief-replay``) needs.
+- ``record_inputs:=true`` (owner decision Q-12) also runs ``ros2 bag record`` of Belief's input
+  topics (the four inputs and the optional image records) into
+  ``<root>/data/Belief_data/<stamp>-inputs``. Control's run bag excludes the sonar topics, so
+  this recording is what an offline replay (``blueboat-belief-replay``) needs.
 
 ROS imports are optional (the SSS-Sim pattern), so the offline smoke test can import the
 module-scope helpers without ``launch`` installed.
@@ -32,6 +33,7 @@ INPUT_TOPICS = (
     "/sss_ai/detections",
     "/blueboat/odom",
     "/mavros/global_position/global",
+    "/sss_ai/image_records",          # optional companion (docs/MATH.md §8.2); recorded when present
 )
 
 
@@ -40,8 +42,9 @@ def as_bool(text: str) -> bool:
 
 
 def record_command(out_dir: str) -> list:
-    """The ``ros2 bag record`` command line for Belief's inputs (mcap)."""
-    return ["ros2", "bag", "record", "-s", "mcap", "-o", out_dir, *INPUT_TOPICS]
+    """The ``ros2 bag record`` command line for Belief's inputs (mcap). ``--topics``: positional
+    topic names are deprecated in Jazzy's ``ros2 bag record``."""
+    return ["ros2", "bag", "record", "-s", "mcap", "-o", out_dir, "--topics", *INPUT_TOPICS]
 
 
 def record_dir(data_dir: str, now: _dt.datetime) -> str:

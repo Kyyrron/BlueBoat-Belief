@@ -78,17 +78,22 @@ def rho_table(n: int, origin_deg: float, fold_opposite: bool, theta_deg: float) 
 
 
 def combine_miss(lnq_open, rho, pd, ordering: str) -> np.ndarray:
-    """MATH §7: ln Q after a look with dependence rho and best covered PD, from ln Q at look open."""
+    """MATH §7: ln Q after a look with dependence rho and best covered PD, from ln Q at look open.
+
+    ``paull_pairwise`` is evaluated by case (MATH §7, numerical form). When the look is no stronger
+    than the accumulated coverage, ``ln Q_open`` is carried through unchanged, so rho = 0 is an
+    exact no-op. The result is clamped to ``<= ln Q_open``: Q never rises, also not by rounding.
+    """
     lnq_open = np.asarray(lnq_open, dtype=np.float64)
     rho = np.asarray(rho, dtype=np.float64)
     pd = np.asarray(pd, dtype=np.float64)
     if ordering == "sequential":
-        return lnq_open + np.log1p(-rho * pd)
+        return np.minimum(lnq_open + np.log1p(-rho * pd), lnq_open)
     if ordering == "paull_pairwise":
         c_acc = -np.expm1(lnq_open)
-        c_hi = np.maximum(c_acc, pd)
-        c_lo = np.minimum(c_acc, pd)
-        return np.log1p(-c_hi) + np.log1p(-rho * c_lo)
+        weaker = lnq_open + np.log1p(-rho * pd)                 # PD* <= c_acc: c_hi = c_acc
+        stronger = np.log1p(-pd) + np.log1p(-rho * c_acc)       # PD* >  c_acc: c_hi = PD*
+        return np.minimum(np.where(pd > c_acc, stronger, weaker), lnq_open)
     raise ValueError(f"unknown ordering {ordering!r}")
 
 

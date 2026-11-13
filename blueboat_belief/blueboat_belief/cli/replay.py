@@ -1,7 +1,7 @@
 """blueboat-belief-replay: feed a recorded rosbag2 through the core offline (deterministic).
 
-The T12 determinism route (docs/PHASE2_DESIGN.md §1).
-1. Messages of the four input topics are read with ``rosbags`` (pure Python, no ROS) in
+The determinism route (docs/DESIGN.md §2 item 4).
+1. Messages of the input topics (the four primary ones and the image records) are read with ``rosbags`` (pure Python, no ROS) in
    **log-time order**.
 2. Zero header stamps take the log (receive) time.
 3. The final snapshot is written to ``--out``, or to ``<root>/data/Belief_data/<bag>-replay``.
@@ -33,6 +33,7 @@ TOPICS = {
     "/sss_ai/detections": "dets",
     "/blueboat/odom": "odom",
     "/mavros/global_position/global": "fix",
+    "/sss_ai/image_records": "rec",           # optional companion (docs/MATH.md §8.2)
 }
 
 
@@ -45,6 +46,12 @@ def dispatch(belief: Belief, kind: str, msg, log_time_s: float) -> None:
         belief.ingest_fix(ad.fix_from_msg(msg, log_time_s)[0])
     elif kind == "dets":
         belief.ingest_detections(ad.detections_from_msg(msg)[0])
+    elif kind == "rec":
+        rec = ad.record_from_msg(msg)
+        if rec is None:
+            belief.reject_record()
+        else:
+            belief.ingest_record(rec)
 
 
 def _extra_types(msg_dirs: Iterable[str]) -> dict:
@@ -79,7 +86,7 @@ def replay(bag: str, belief: Belief, msg_dirs: Iterable[str] = ()) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="blueboat-belief-replay", description=__doc__.splitlines()[0])
-    ap.add_argument("bag", help="rosbag2 folder or .mcap")
+    ap.add_argument("bag", help="rosbag2 folder (the one holding metadata.yaml)")
     ap.add_argument("--area", required=True, help="world folder / metadata.yaml / survey-area file")
     ap.add_argument("--config", default="", help="belief YAML (default: built-in defaults)")
     ap.add_argument("--out", default="", help="output folder (claimed exclusively)")

@@ -13,14 +13,29 @@ costs one line there.
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..core.belief import Det, DetArray, FixObs, OdomObs, PingObs
+from ..core.belief import Det, DetArray, FixObs, ImageRec, OdomObs, PingObs
 from ..core.contract import CONTACT_FIELDS, GRID_FIELDS
 from ..core.geometry import yaw_from_quaternion
+
+
+# Parameters that are not Belief configuration and may always be given to the node.
+NON_CONFIG_PARAMETERS = ("use_sim_time", "start_type_description_service")
+
+
+def unknown_parameters(given, declared) -> list:
+    """Names in ``given`` that are neither declared nor ROS's own.
+
+    ``core/config.py`` refuses unknown keys. On the ROS path an undeclared parameter override is
+    silently dropped by rclpy, so the node checks its overrides with this: a misspelt key must
+    stop the node, not be ignored."""
+    return sorted(n for n in given if n not in declared and n not in NON_CONFIG_PARAMETERS
+                  and not str(n).startswith("qos_overrides."))
 
 
 def get(obj: Any, name: str, default: Any = None) -> Any:
@@ -76,7 +91,7 @@ def ping_from_msg(msg: Any, arrival_t: float = 0.0) -> Tuple[PingObs, bool]:
 
 def odom_from_msg(msg: Any, arrival_t: float = 0.0) -> Tuple[OdomObs, bool]:
     """``nav_msgs/Odometry`` -> (OdomObs, zero_stamp_used_arrival). Zero stamps happen on the
-    real launch (mavros on use_sim_time without /clock; LOCAL_CHECKLIST L-2)."""
+    real launch (mavros on use_sim_time without /clock; TODO real-boat check L-2)."""
     t = stamp_to_s(get(get(msg, "header"), "stamp"))
     used = t == 0.0
     if used:
@@ -126,6 +141,52 @@ def detections_from_msg(msg: Any) -> Tuple[DetArray, int]:
                         cov=R, size_x=float(get(bbox, "size_x", float("nan"))),
                         size_y=float(get(bbox, "size_y", float("nan")))))
     return DetArray(t=t_img, detections=tuple(dets)), skipped
+
+
+RECORD_SCHEMA = "blueboat_perception/image_record/1"
+
+
+def record_from_msg(msg: Any) -> Optional[ImageRec]:
+    """Perception's per-image record (``std_msgs/String`` JSON, or the decoded dict) -> ImageRec.
+
+    Reads only what docs/MATH.md §8.2 names: the row span, whether the detector searched the
+    image, the dummy flag and the calibration flag. Returns None for anything it cannot use
+    (malformed JSON, another schema, no time span); the caller counts it as ``bad_record``.
+    Never raises on input data."""
+    if isinstance(msg, (str, bytes, bytearray)):
+        rec = msg                                        # the JSON text itself
+    elif isinstance(msg, dict):
+        rec = msg["data"] if ("data" in msg and "schema" not in msg) else msg
+    else:
+        rec = getattr(msg, "data", None)                 # std_msgs/String (rclpy or rosbags)
+    if isinstance(rec, (str, bytes, bytearray)):
+        try:
+            rec = json.loads(rec)
+        except (ValueError, UnicodeDecodeError):
+            return None
+    if not isinstance(rec, dict) or rec.get("schema") != RECORD_SCHEMA:
+        return None
+    time = rec.get("time")
+    proc = rec.get("processing")
+    if not isinstance(time, dict) or not isinstance(proc, dict):
+        return None
+    t_min, t_max = time.get("t_min_s"), time.get("t_max_s")
+    if isinstance(t_min, bool) or isinstance(t_max, bool) \
+            or not isinstance(t_min, (int, float)) or not isinstance(t_max, (int, float)):
+        return None
+    det = proc.get("detector") if isinstance(proc.get("detector"), dict) else {}
+    cal = proc.get("calibration") if isinstance(proc.get("calibration"), dict) else {}
+    pre = proc.get("preprocess") if isinstance(proc.get("preprocess"), dict) else {}
+    params = pre.get("params") if isinstance(pre.get("params"), dict) else {}
+    mask = params.get("near_range_mask_m", 0.0)
+    calibrated = cal.get("calibrated")
+    return ImageRec(
+        key=str(rec.get("key", "")), t_min=float(t_min), t_max=float(t_max),
+        searched=det.get("status") == "ran" and isinstance(rec.get("detections"), list),
+        dummy=bool(det.get("dummy", False)),
+        calibrated=calibrated if isinstance(calibrated, bool) else None,
+        detector=str(det.get("name", "")),
+        near_range_mask_m=float(mask) if isinstance(mask, (int, float)) and not isinstance(mask, bool) else 0.0)
 
 
 # ---------------------------------------------------------------------------- outputs

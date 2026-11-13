@@ -6,7 +6,10 @@ validated ``blueboat_survey_area/1`` file, either:
 - from a rectangle about an anchor:
   ``--anchor LAT LON --local X_MIN Y_MIN X_MAX Y_MAX`` (metres, ENU about the anchor); or
 - from a simulator world: ``--from-world <world folder | metadata.yaml>``, which copies its
-  ``geo_anchor`` and ``limits``. Ground truth (``objects``) is not read.
+  ``geo_anchor`` and ``limits``. Ground truth (``objects``) is not read; or
+- from a BlueBoat-Replanner mission file: ``--from-mission <mission.yaml> [--margin-m M]
+  [--anchor LAT LON]``. The area is the bounding rectangle of the mission's single WGS-84
+  polygon, so the two modules describe the same area from one file.
 
 The output is created exclusively (O_EXCL): an existing file is never overwritten (CM-7).
 """
@@ -21,17 +24,23 @@ from pathlib import Path
 from typing import List, Optional
 
 from ..core.area import AreaError, make_area_dict
-from ..io.missions import load_area_file
+from ..io.missions import load_area_file, mission_rectangle
 
 
 def build(args) -> dict:
     created = args.created or _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if args.from_world and args.from_mission:
+        raise AreaError("give --from-world or --from-mission, not both")
     if args.from_world:
         w = load_area_file(args.from_world)
         x0, y0, x1, y1 = w.local
         return make_area_dict(w.lat0, w.lon0, x0, y0, x1, y1, name=args.name or w.name, created=created)
+    if args.from_mission:
+        lat0, lon0, x0, y0, x1, y1, name = mission_rectangle(args.from_mission, args.anchor, args.margin_m)
+        return make_area_dict(lat0, lon0, x0, y0, x1, y1, name=args.name or name, created=created)
     if args.anchor is None or args.local is None:
-        raise AreaError("give --anchor LAT LON and --local X_MIN Y_MIN X_MAX Y_MAX, or --from-world")
+        raise AreaError("give --anchor LAT LON and --local X_MIN Y_MIN X_MAX Y_MAX, "
+                        "or --from-world, or --from-mission")
     lat0, lon0 = args.anchor
     x0, y0, x1, y1 = args.local
     return make_area_dict(lat0, lon0, x0, y0, x1, y1, name=args.name, created=created)
@@ -55,6 +64,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--anchor", nargs=2, type=float, metavar=("LAT", "LON"))
     ap.add_argument("--local", nargs=4, type=float, metavar=("X_MIN", "Y_MIN", "X_MAX", "Y_MAX"))
     ap.add_argument("--from-world", default="", help="world folder or metadata.yaml")
+    ap.add_argument("--from-mission", default="", help="BlueBoat-Replanner mission file (one WGS-84 polygon)")
+    ap.add_argument("--margin-m", type=float, default=0.0,
+                    help="with --from-mission: grow the bounding rectangle by this many metres")
     args = ap.parse_args(argv)
     try:
         d = build(args)

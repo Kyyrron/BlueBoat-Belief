@@ -14,7 +14,7 @@ For every quantity, §0 gives:
 - the validity range;
 - whether it is a literature result or a project decision (brief §17.12).
 
-> **Priority (owner, 2026-11-04): detector calibration.** Perception's calibration is the identity
+> **Priority: detector calibration.** Perception's calibration is the identity
 > today (`calibrated: false`), and `/sss_ai/detections` carries no calibration flag. Every equation
 > below that uses the score `q` as a probability (§9, §10) is therefore applied to an
 > **uncalibrated score**. `p_exists` is then a score-derived index, **not a probability**, until the
@@ -149,7 +149,7 @@ Implemented by `models.rho_table`; checked in [6].
 
 1. Sector centres are `c_k = o + (k + ½)·360/S`.
 2. `Δ(k, k') = min(|c_k − c_k'| mod 360, 360 − …)` ∈ [0°, 180°].
-3. With `rho.fold_opposite` (the default, owner 2026-11-04), `Δ ← min(Δ, 180° − Δ)` ∈ [0°, 90°]:
+3. With `rho.fold_opposite` (the default, owner decision D-6 / Q-10), `Δ ← min(Δ, 180° − Δ)` ∈ [0°, 90°]:
    Paull's α, the angle between insonification **lines**.
 4. `ρ(k | M) = min_{k'∈M} clip(Δ(k, k')/θ, 0, 1)`, where M is the set of searched sectors and
    θ = `rho.independence_angle_deg` (90°). `ρ(k | ∅) = 1`.
@@ -157,15 +157,15 @@ Implemented by `models.rho_table`; checked in [6].
    "Let two confidences obtained from subsequent passes…"; brief §17.4).
 6. Paull computes α from the actual insonification angles θ₁, θ₂. Belief uses sector centres, so
    ρ moves in steps of 1/3 at S = 12. Bourgault 2006 §4.3 warns that a stepped detection model
-   makes a planner's objective jagged. Bearing-resolved ρ is a [P2] contract addition
+   makes a planner's objective jagged. Bearing-resolved ρ is a [P1] additive contract field
    (`TODO.md`), not built.
 
 ## 7. Aggregate miss and background (the PFA = 0 special case, stated)
 
 Implemented by `models.combine_miss` and `grid.Grid.observe_ping`; checked in [6].
 
-**`rho.ordering: paull_pairwise`** (the default since 2026-11-04: owner decision, after reading
-Paull §III-C). With `c_acc = 1 − Q_open`, the accumulated coverage at look open:
+**`rho.ordering: paull_pairwise`** (the default, owner decision D-6, after reading Paull
+§III-C). With `c_acc = 1 − Q_open`, the accumulated coverage at look open:
 
     c_hi = max(c_acc, PD*)
     c_lo = min(c_acc, PD*)
@@ -180,6 +180,40 @@ assume that c¹ ≥ c²"):
 
 Applied look by look against the accumulated coverage, it is exact for two looks and a
 heuristic beyond.
+
+**Numerical form** (`models.combine_miss`; checked in [6]). The rule is evaluated by case, so
+that it is exact and can never raise Q:
+- `PD* ≤ c_acc` (the look is no stronger than what is accumulated):
+  `ln Q = ln Q_open + ln(1 − ρ·PD*)`. `ln Q_open` is carried through unchanged, so a look with
+  ρ = 0 leaves `ln Q` bit-identical, however often it repeats.
+- `PD* > c_acc`: `ln Q = ln(1 − PD*) + ln(1 − ρ·c_acc)`.
+- In both cases `ln Q ← min(ln Q, ln Q_open)`. Mathematically `Q ≤ Q_open` always, so the clamp
+  removes rounding only.
+
+The case form matters in floating point: recomputing `ln(1 − c_hi)` through
+`c_acc = 1 − exp(ln Q_open)` is not exact (with numpy 1.26.4 a same-sector repeat at PD 0.7 moved
+`ln Q` by 2.2e-16, and random look sequences raised it by up to 9e-15); smoke [6] pins the
+exact form in both Python environments.
+
+**Order dependence beyond two looks (a limitation, kept).** The look-by-look rule is monotone
+(Q never rises) but not symmetric in the order of three or more looks, because ρ is taken against
+the sectors searched *so far*. At PD 0.7 per look and S = 12 (checked in [6]):
+
+| Looks (boat yaw, port side) | Coverage |
+|---|---|
+| 0°, 90°, 30° | 0.9310 |
+| 0°, 30°, 90° | 0.8773 |
+| 0°, 30°, 60°, 90° in every order | 0.8648 … 0.9471 |
+| 0°, 180°, 90°, 270° (two-pass orthogonal, both sides) in every order | 0.9100 = 1 − 0.3² |
+
+- The two-pass orthogonal pattern is order-independent, because its looks are either on the same
+  line (ρ = 0) or perpendicular (ρ = 1).
+- A pattern with intermediate angles is credited up to 0.08 more or less depending on the order
+  in which the same looks happen.
+- Consequence: `coverage` and `summary.area_cumulative_pd` are a planning aid. They must not be
+  used to compare survey policies whose look orders differ; that comparison needs ground truth.
+- Paull defines only the pair. An order-independent rule for n looks would be a new model, not
+  one taken from a source, so none is adopted here.
 
 **`rho.ordering: sequential`** (a switch: the brief's §6.4 effective-PD form):
 
@@ -216,6 +250,19 @@ the area and NaN outside.
 
 ## 8. Detector coverage: when a non-detection is evidence
 
+A non-detection is evidence only where the detector had a valid opportunity to detect (brief
+§17.9). Belief has two ways to know that, selected by `coverage.source`:
+
+| `coverage.source` | Coverage comes from | Used when |
+|---|---|---|
+| `arrays` | the stamps of `/sss_ai/detections` arrays (§8.1, a stated heuristic) | only detections are available (the Replanner's emulator, four-topic bags) |
+| `records` | Perception's per-image records `/sss_ai/image_records` (§8.2, exact spans) | Perception is the detector |
+| `auto` (default) | §8.1 until the first valid record arrives, §8.2 from then on | always safe |
+
+`model_params_json.coverage_source` publishes which one is in force.
+
+### 8.1 From detection-array stamps (heuristic)
+
 Implemented by `coverage.CoverageTimeline`; checked in [6] and [14].
 
 1. Arrays `a_n` arrive with stamps `t_n` = the newest row of an image. Images are 256 rows at
@@ -232,10 +279,61 @@ Implemented by `coverage.CoverageTimeline`; checked in [6] and [14].
 6. `coverage.require_detector: false` (development only) releases every ping immediately as
    covered, and `model_params_json.negative_evidence` = `"ungated"`.
 
+**What the heuristic gets wrong** (measured on a synthetic 100 m pass, checked in [21]):
+- The first image after each GCS START has no earlier stamp to bracket it, so its pings are
+  never credited: about one image length of track (4.3 m), 3.9 % of one 100 m line.
+- An image with no pixels (`detections: null` in the record) arrives on the wire as an empty
+  array and is credited as "searched, nothing found".
+- The dummy detector is recognised only by its class name.
+
+### 8.2 From per-image records (exact spans; owner decision D-10)
+
+Implemented by `coverage.RecordTimeline` and `Belief.ingest_record`; checked in [21].
+
+Perception publishes one JSON record per seabed image on `/sss_ai/image_records`
+(`blueboat_perception/image_record/1`), right after that image's detection array
+(`perception_node.py:266-270`). Belief reads four things from it and nothing else:
+
+| Record field | Used as |
+|---|---|
+| `time.t_min_s`, `time.t_max_s` | the image's row span `[t_min, t_max]` on the sonar-profile clock |
+| `processing.detector.status` and `detections` | *searched* iff the status is `ran` and `detections` is a list (`null` = no pixels or no detector input) |
+| `processing.detector.dummy` | a dummy detector searches nothing |
+| `processing.calibration.calibrated` | published as `model_params_json.detector_calibrated_observed` |
+
+1. **Covered.** A ping at τ is covered iff some record m is searched, is not from a dummy, and
+   has `t_min(m) ≤ τ ≤ t_max(m)`.
+2. **Final.** On record m, every ping with `τ < t_max(m−1)` is released. Each image overlaps only
+   its two neighbours (256 rows at stride 128), so no later image can contain such a ping. The
+   assumption is checked on every record: `t_min(m) ≥ t_max(m−2)`. The first violation is counted
+   (`stats.records_overlap`), and from then on the bound is `τ < t_min(m)`, which holds for any
+   overlap because images arrive in increasing `t_min`.
+3. **Array before record.** Record m is applied only once an array with stamp `≥ t_max(m)` has
+   been seen, so the detections of image m are queued before any ping they belong to is
+   released. A record whose array never comes is applied when the next record arrives
+   (`stats.records_without_array`). The result therefore does not depend on which of the two
+   topics is delivered first (checked in [21]).
+4. **Expiry** is as in §8.1 item 4.
+5. Detections are still taken from `/sss_ai/detections` only. No detection data is read from a
+   record, so the two inputs cannot be counted twice.
+
+Latency is the same as in §8.1: a ping is released one to two image strides after it was
+acquired, plus the detector's processing time. On a real log images spanned 5.47 s
+at a 2.75 s stride.
+
+**Not modelled.** `processing.preprocess.params.near_range_mask_m` (a slant-range blank on the
+detector input, 0 by default) is reported in `/diagnostics` when non-zero and is not applied to
+the PD model.
+
 ## 9. Contacts: existence (Bernoulli-inspired)
 
 Implemented by `contacts.ContactTable`; checked in [7]. π = `detector.base_rate`.
 
+0. **Pose of a detection.** The boat pose at the detection's row time is looked up when the
+   detection **arrives** (`Belief.ingest_detections`), from the ping poses, else from odometry,
+   within `pose.stamp_tolerance_s`. The detection itself is applied later, when it is released
+   (§8). Looking the pose up at release instead would drop a detection released more than
+   `pose.buffer_s` (30 s) after its row, e.g. at shutdown (checked in [22]).
 1. **Association.** Map-frame detection `z`, covariance `R`. Candidates are the contacts with
    `‖z − x_c‖ ≤ association.gate_m` (2 m) **and**
    `(z − x_c)ᵀ(R + P_c)⁻¹(z − x_c) ≤ association.chi2` (9.21). Pick the smallest Mahalanobis
@@ -259,6 +357,17 @@ Implemented by `contacts.ContactTable`; checked in [7]. π = `detector.base_rate
    but no input carries it yet. Otherwise the state is candidate.
 10. **Pruning**: a candidate with `p_exists < contact.prune_p` is dropped. The table is capped at
     `contact.max_contacts`, lowest `p_exists` first. Uids are retired.
+
+**A known inconsistency with §7 (kept, low stakes while scores are raw).** Item 4 is the
+sequential form: a later detected look adds `ρ_c·(logit q* − logit π)`. With ρ_c = 0 (the same
+line as an earlier look) it adds nothing, even when its score is higher than the first one. The
+grid uses the pairwise rule, where a stronger look on the same line replaces the weaker one
+(§7, owner decision D-6). Example: a target first detected far out with score 0.4 and then, from
+the adjacent lane on the same line, close in with score 0.9 keeps `p_exists = 0.4`.
+- It does not affect `state`: two detected looks confirm the contact whatever their scores.
+- It does not affect `max_confidence`, which records 0.9.
+- It is not changed here: with uncalibrated scores `p_exists` is not a probability anyway, and
+  a pairwise form for mixed detections and misses would be a new model. `TODO.md` [P2].
 
 ## 10. Contacts: position and class
 
@@ -304,15 +413,19 @@ The contact's **own mass inside the disc** is used, never the rendered map: a ce
 under-counts a spread contact (brief §7, v1 bug 2). For an isotropic contact at the centre,
 `m = 1 − exp(−R²/2σ²)` (checked in [8]).
 
-## 13. What the primary sources say, and how Belief uses them (read 2026-11-04)
+## 13. What the primary sources say, and how Belief uses them
 
 Paull et al. 2013 and Bourgault et al. 2006 were read in full from PDFs the owner supplied;
 Yordanova & Gips 2020 from its arXiv preprint. Exact citations and read status:
-`docs/REFERENCES.md`.
+`docs/REFERENCES.md`. The passages quoted below were checked against the two PDFs (Paull §II-C,
+§III-A Eq. 5, §III-C Eqs. 22–24; Bourgault §2.2, Eq. 4, §4.1, §4.3, §4.4).
 
-1. **Paull's "confidence" is not a detection probability.** `c_ij = P(m_ij = M_ij)`: the
-   probability that the belief equals the truth (Eq. 5).
-   - Eq. 9, `P(M = 1 | m = 1) = c·p/(2cp − c − p + 1)`, follows only if
+1. **Paull's "confidence" is introduced as a detection probability and formalised as something
+   else.** The text says it "represents the confidence that if a mine exists, it will be
+   detected", then defines `P(T_ij = 1) = P(m_ij = M_ij) = c_ij`: the probability that the
+   belief equals the truth (Eq. 5).
+   - Belief follows the verbal definition: it applies Eqs. 22–24 to PD.
+   - Eq. 9, `P(M = 1 | m = 1) = c·p/(2cp − c − p + 1)`, follows only from the formal one, with
      `P(m = 1 | M = 0) = 1 − c`, i.e. symmetric errors.
    - Its P(y) curves run from 0.5 (no information) to 1 (Fig. 2).
    - Belief applies the Eqs. 22–24 combination rule to **PD**, the probability of detecting a

@@ -1,4 +1,4 @@
-"""Validated configuration (docs/PHASE2_DESIGN.md §6).
+"""Validated configuration (docs/DESIGN.md §1; defaults = config/belief.yaml, smoke [1]).
 
 Every section is a frozen dataclass. Unknown keys raise by name (the SSS-Sim ``_strict``
 pattern). ROS parameters are flat ``section.key`` names (``to_flat`` / ``from_flat``).
@@ -130,6 +130,7 @@ class AlignmentCfg:
 @dataclass(frozen=True)
 class CoverageCfg:
     require_detector: bool = True        # owner 2026-11-04 (Q-7)
+    source: str = "auto"                 # owner 2026-11-12: auto | arrays | records (MATH §8)
     max_array_gap_s: float = 30.0
     wait_s: float = 60.0
 
@@ -173,6 +174,7 @@ _SECTIONS = {
 }
 
 ORDERINGS = ("sequential", "paull_pairwise")
+COVERAGE_SOURCES = ("auto", "arrays", "records")
 
 
 def _coerce(cls, name: str, value: Any, where: str) -> Any:
@@ -333,6 +335,7 @@ def validate(c: BeliefConfig) -> None:
     need(math.isnan(c.alignment.origin_lat) == math.isnan(c.alignment.origin_lon),
          "alignment.origin_lat and origin_lon are set together")
     need(c.coverage.max_array_gap_s > 0 and c.coverage.wait_s > 0, "coverage times must be > 0")
+    need(c.coverage.source in COVERAGE_SOURCES, f"coverage.source must be one of {COVERAGE_SOURCES}")
     need(c.turn.window_s > 0 and c.turn.min_speed_mps >= 0 and c.turn.min_yaw_rate_rad_s > 0,
          "turn: window_s > 0, min_speed_mps >= 0, min_yaw_rate_rad_s > 0")
     need(c.publish.grid_rate_hz > 0 and c.publish.display_rate_hz > 0, "publish rates must be > 0")

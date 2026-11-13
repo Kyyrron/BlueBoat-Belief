@@ -16,8 +16,9 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from blueboat_belief.core.belief import Det, DetArray, FixObs, OdomObs, PingObs
+from blueboat_belief.core.belief import Det, DetArray, FixObs, ImageRec, OdomObs, PingObs
 from blueboat_belief.core.geo import local_en_to_latlon
+from blueboat_belief.core.geometry import processor_side_offsets
 
 LAT0, LON0 = 33.8900, 130.8800          # arbitrary datum (Kitakyushu bay)
 LEVER = 0.285
@@ -38,10 +39,7 @@ def area_dict(xmin: float, ymin: float, xmax: float, ymax: float, lat0: float = 
 
 def side_offsets(h: float, side: int, n: int = 1200, length_m: float = 20.0) -> np.ndarray:
     """The processor's ground offsets for one side (``sss_helper.project_side``)."""
-    slant = np.arange(n) / (n - 1) * length_m
-    keep = slant > h
-    g = np.sqrt(np.maximum(slant[keep] ** 2 - h * h, 0.0))
-    return (side * (LEVER + g)).astype(np.float32)
+    return processor_side_offsets(h, side, n, length_m, LEVER)
 
 
 def straight_pass(x0: float, y0: float, yaw: float, speed: float, duration: float,
@@ -128,8 +126,33 @@ def arrays_for(pings: Sequence[PingObs], targets: Sequence[Tuple[float, float]],
     return out
 
 
-def events(pings, odom=(), fixes=(), arrays=(), array_latency_s: float = 1.0) -> list:
-    """Arrival-ordered events: (arrival time, order, kind, obj); arrays arrive after their stamp."""
+def records_for(pings: Sequence[PingObs], arrays: Sequence[DetArray], period_s: float = 2.0,
+                searched=True, dummy: bool = False, calibrated: Optional[bool] = False,
+                stream: str = "synthetic") -> List[ImageRec]:
+    """The image record of each array of ``arrays_for(pings, ..., period_s=period_s)``.
+
+    Image k spans the pings in ``(stamp_k - 2*period, stamp_k]``: ``t_max`` is the array's
+    stamp and ``t_min`` the oldest ping of that window. ``searched`` is a bool, or a callable
+    ``k -> bool`` (False = Perception's ``detections: null``, no pixels)."""
+    times = np.array([p.t for p in pings])
+    t_start = float(times[0])
+    out: List[ImageRec] = []
+    for k, a in enumerate(arrays):
+        lo = t_start + (k + 1) * period_s - 2.0 * period_s
+        i = int(np.searchsorted(times, lo, side="right"))
+        ok = searched(k) if callable(searched) else bool(searched)
+        out.append(ImageRec(key=f"{stream}/{k}", t_min=float(times[min(i, times.size - 1)]),
+                            t_max=float(a.t), searched=ok, dummy=dummy, calibrated=calibrated,
+                            detector="dummy_center" if dummy else "synthetic"))
+    return out
+
+
+def events(pings, odom=(), fixes=(), arrays=(), array_latency_s: float = 1.0, records=(),
+           record_first: bool = False) -> list:
+    """Arrival-ordered events: (arrival time, order, kind, obj); arrays arrive after their stamp.
+
+    A record arrives with its array: just after it, as Perception publishes them, or just before
+    it with ``record_first`` (the two topics are delivered independently)."""
     ev = []
     for o in odom:
         ev.append((o.t, 0, "odom", o))
@@ -138,7 +161,9 @@ def events(pings, odom=(), fixes=(), arrays=(), array_latency_s: float = 1.0) ->
     for p in pings:
         ev.append((p.t + 0.01, 2, "ping", p))
     for a in arrays:
-        ev.append((a.t + array_latency_s, 3, "dets", a))
+        ev.append((a.t + array_latency_s, 4, "dets", a))
+    for r in records:
+        ev.append((r.t_max + array_latency_s, 3 if record_first else 5, "rec", r))
     ev.sort(key=lambda e: (e[0], e[1]))
     return ev
 
@@ -151,6 +176,8 @@ def feed(belief, evs) -> None:
             belief.ingest_fix(obj)
         elif kind == "ping":
             belief.ingest_ping(obj)
+        elif kind == "rec":
+            belief.ingest_record(obj)
         else:
             belief.ingest_detections(obj)
 

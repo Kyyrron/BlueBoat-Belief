@@ -44,6 +44,20 @@ def sample_xy(x: float, y: float, yaw: float, yoff: np.ndarray):
     return x - yoff * s, y + yoff * c
 
 
+def processor_side_offsets(altitude_m: float, side: int, n_bins: int = 1200,
+                           range_m: float = 20.0, lever_arm_m: float = 0.285) -> np.ndarray:
+    """The signed ground offsets ``sss_processor_node`` publishes for one side, near to far.
+
+    ``slant_i = i/(n_bins-1) * range_m``; the water column (``slant <= altitude``) is dropped;
+    ``y = side * (lever_arm + sqrt(slant^2 - altitude^2))`` (``BlueBoat-SSS`` ``sss_helper.py``).
+    For building ``PingObs`` offline (docs/OFFLINE_CORE_API.md); checked against the processor's
+    sample count in smoke [5]."""
+    slant = np.arange(n_bins) / (n_bins - 1) * range_m
+    keep = slant > altitude_m
+    ground = np.sqrt(np.maximum(slant[keep] ** 2 - altitude_m * altitude_m, 0.0))
+    return (side * (lever_arm_m + ground)).astype(np.float32)
+
+
 def side_of_point(x: float, y: float, yaw: float, px: float, py: float) -> int:
     """+1 (port) if the point is left of the heading, else -1 (starboard). On the line: port."""
     cross = math.cos(yaw) * (py - y) - math.sin(yaw) * (px - x)

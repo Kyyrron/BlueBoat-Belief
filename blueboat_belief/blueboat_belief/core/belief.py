@@ -19,7 +19,7 @@ from .alignment import Aligner
 from .area import FORMAT_WORLD, SurveyArea, grid_for_area
 from .config import BeliefConfig
 from .contacts import ContactTable, valid_covariance
-from .coverage import CoverageTimeline
+from .coverage import CoverageTimeline, RecordTimeline
 from .geometry import PORT, STARBOARD, look_bearing, sector_of, side_of_point
 from .grid import Grid
 from .pose import FrozenPoseDetector, PoseBuffer
@@ -29,8 +29,9 @@ REASONS = (
     "nan_input", "frozen_pose", "altitude_unknown", "time_reset", "no_pose_at_stamp",
     "outside_area", "bad_covariance", "alignment_pending", "alignment_queue_overflow",
     "no_fix", "ignored_class", "unknown_class", "duplicate_detection", "stale_detection",
-    "future_detection", "zero_stamp_array", "coverage_expired", "empty_ping",
+    "future_detection", "zero_stamp_array", "coverage_expired", "empty_ping", "bad_record",
 )
+STAMP_EPS_S = 1e-6               # an array and its image record carry the same stamp (ns round trip)
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,19 @@ class Det:
 class DetArray:
     t: float                     # image newest-row time [s]; 0 = unknown
     detections: Tuple[Det, ...] = ()
+
+
+@dataclass(frozen=True)
+class ImageRec:
+    """What Belief reads from one Perception image record (docs/MATH.md §8.2)."""
+    key: str                     # "<stream_id>/<image_id>"
+    t_min: float                 # oldest row time [s], sonar-profile clock
+    t_max: float                 # newest row time [s] = the stamp of the image's detection array
+    searched: bool               # the detector ran on pixels (status "ran", detections not null)
+    dummy: bool = False          # a dummy detector searches nothing
+    calibrated: Optional[bool] = None
+    detector: str = ""
+    near_range_mask_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -108,12 +122,23 @@ class Belief:
         self.frozen_ping = FrozenPoseDetector(cfg.pose.frozen_count)
         self.frozen_odom = FrozenPoseDetector(cfg.pose.frozen_count)
         self.timeline = CoverageTimeline(cfg.coverage.max_array_gap_s)
+        self.rtimeline = RecordTimeline()
+        # MATH §8: "records" from the start, never ("arrays"), or from the first valid record ("auto")
+        self.records_mode = cfg.coverage.source == "records"
+        self._held_records: List[ImageRec] = []
+        self._newest_array_t = -math.inf
+        self.observed_calibrated: Optional[bool] = None      # from the newest image record
+        self.observed_detector = ""
+        self.observed_near_range_mask_m = 0.0
         self.turn = TurnEstimator(cfg.turn)
         self.counters: Dict[str, int] = {r: 0 for r in REASONS}
         self.stats: Dict[str, int] = {"pings": 0, "pings_covered": 0, "pings_geometry_only": 0,
                                       "arrays": 0, "detections": 0, "contacts_created": 0,
                                       "fixes": 0, "odom": 0, "backscan_pings": 0,
-                                      "backscan_samples": 0}
+                                      "backscan_samples": 0, "detections_class_other": 0,
+                                      "records": 0, "records_searched": 0,
+                                      "records_unsearched": 0, "records_without_array": 0,
+                                      "records_overlap": 0}
         self.epoch = 0
         self.newest_ping_t = -math.inf
         self.last_event_t = 0.0
@@ -172,13 +197,45 @@ class Belief:
         if not math.isfinite(a.t) or a.t <= 0.0:
             self._count("zero_stamp_array")
             return
+        # The boat pose at each detection's row is resolved now, while the pose buffers still
+        # hold it. A detection is applied later (when released, MATH §8), possibly after the
+        # buffers have moved on.
+        poses = tuple(self._pose_at(d.t_row) for d in a.detections)
         if not self.aligner.valid:
-            self._enqueue("dets", a)
+            self._enqueue("dets", (a, poses))
             return
-        self._accept_dets(a)
+        self._accept_dets(a, poses)
+
+    def _pose_at(self, t: float) -> Optional[Tuple[float, float, float]]:
+        if not math.isfinite(t):
+            return None
+        return self.ping_buf.at(t) or self.odom_buf.at(t)
+
+    def ingest_record(self, r: ImageRec) -> None:
+        """One Perception image record (MATH §8.2). Ignored when ``coverage.source`` is
+        ``arrays``; switches ``auto`` to records on the first valid one."""
+        if not (math.isfinite(r.t_min) and math.isfinite(r.t_max)) or r.t_max <= 0.0 \
+                or r.t_min > r.t_max:
+            self._count("bad_record")
+            return
+        self.stats["records"] += 1
+        self.observed_calibrated = r.calibrated
+        self.observed_detector = r.detector
+        self.observed_near_range_mask_m = float(r.near_range_mask_m)
+        if self.cfg.coverage.source == "arrays" or not self.cfg.coverage.require_detector:
+            return
+        if not self.aligner.valid:
+            self._enqueue("rec", r)
+            return
+        self._accept_record(r)
+
+    def reject_record(self) -> None:
+        """An image record that could not be read (malformed JSON, other schema, no time span)."""
+        self._count("bad_record")
 
     def finish(self) -> None:
         """End of input: release everything pending (coverage judged as is), close every look."""
+        self._apply_held_records(math.inf, missing=True)
         self._release(math.inf)
         self.contacts.close_all()
 
@@ -201,14 +258,19 @@ class Belief:
                 kind, obj = self._queue.popleft()
                 if kind == "ping":
                     self._accept_ping(obj)          # type: ignore[arg-type]
+                elif kind == "rec":
+                    self._accept_record(obj)        # type: ignore[arg-type]
                 else:
-                    self._accept_dets(obj)          # type: ignore[arg-type]
+                    self._accept_dets(*obj)         # type: ignore[misc]
 
     def _new_epoch(self) -> None:
         self._count("time_reset")
+        self._apply_held_records(math.inf, missing=True)
         self._release(math.inf)
         self.contacts.close_all()
         self.timeline.clear()
+        self.rtimeline.clear()
+        self._newest_array_t = -math.inf
         self.turn.clear()
         self.ping_buf.clear()
         self._seen_det.clear()
@@ -226,16 +288,46 @@ class Belief:
         self._push(p.t, 0, p)
         self._expire(p.t)
 
-    def _accept_dets(self, a: DetArray) -> None:
+    def _accept_record(self, r: ImageRec) -> None:
+        """MATH §8.2: a record is applied once its own detection array has been seen."""
+        self.records_mode = True                            # "auto": records from now on
+        self._apply_held_records(math.inf, missing=True)    # older ones: their array never came
+        if self._newest_array_t >= r.t_max - STAMP_EPS_S:
+            self._apply_record(r)
+        else:
+            self._held_records.append(r)
+
+    def _apply_held_records(self, array_t: float, missing: bool) -> None:
+        """Apply the held records whose array stamp is ``<= array_t``, in arrival order."""
+        keep: List[ImageRec] = []
+        for r in self._held_records:
+            if r.t_max <= array_t + STAMP_EPS_S:
+                if missing:
+                    self.stats["records_without_array"] += 1
+                self._apply_record(r)
+            else:
+                keep.append(r)
+        self._held_records = keep
+
+    def _apply_record(self, r: ImageRec) -> None:
+        searched = r.searched and not r.dummy
+        self.stats["records_searched" if searched else "records_unsearched"] += 1
+        if self.rtimeline.add(r.t_min, r.t_max, searched):
+            self.stats["records_overlap"] += 1
+        self._release(self.rtimeline.release_bound)
+        self._expire(r.t_max)
+
+    def _accept_dets(self, a: DetArray, poses: Tuple[Optional[Tuple[float, float, float]], ...]) -> None:
         self.stats["arrays"] += 1
+        self._newest_array_t = max(self._newest_array_t, a.t)
         ignore = set(self.cfg.detector.ignore_classes)
         real = True
         for d in a.detections:
             if d.class_name in ignore:
                 real = False
-        if self.cfg.coverage.require_detector:
+        if self.cfg.coverage.require_detector and not self.records_mode:
             self.timeline.add_array(a.t, real)
-        for d in sorted(a.detections, key=lambda d: (d.t_row, d.id)):
+        for d, pose in sorted(zip(a.detections, poses), key=lambda dp: (dp[0].t_row, dp[0].id)):
             if d.class_name in ignore:
                 self._count("ignored_class")
                 continue
@@ -252,10 +344,16 @@ class Belief:
             if key in self._seen_det:
                 self._count("duplicate_detection")
                 continue
+            if pose is None:
+                self._count("no_pose_at_stamp")
+                continue
             self._seen_det.add(key)
-            self._push(d.t_row, 1, d, stamp=a.t)
+            self._push(d.t_row, 1, (d, pose), stamp=a.t)
         if self.cfg.coverage.require_detector:
-            self._release(self.timeline.release_bound)
+            if self.records_mode:
+                self._apply_held_records(a.t, missing=False)
+            else:
+                self._release(self.timeline.release_bound)
             self._expire(a.t)
         else:
             self._release(math.inf)
@@ -275,10 +373,16 @@ class Belief:
 
     def _dispatch(self, ev: _Pending, gated: bool) -> None:
         if ev.kind == 0:
-            covered = self.timeline.covered(ev.t) if gated else True
+            if not gated:
+                covered = True
+            elif self.records_mode:
+                covered = self.rtimeline.covered(ev.t)
+            else:
+                covered = self.timeline.covered(ev.t)
             self._process_ping(ev.obj, covered)     # type: ignore[arg-type]
         else:
-            self._process_det(ev.obj, ev.stamp)     # type: ignore[arg-type]
+            d, pose = ev.obj                        # type: ignore[misc]
+            self._process_det(d, pose, ev.stamp)
 
     # ------------------------------------------------------------ evidence
     def _contact_cells(self) -> Dict[int, int]:
@@ -343,12 +447,8 @@ class Belief:
         return (u.sigma_pose_m ** 2) * np.eye(2) + np.outer(Jb, Jb) * math.radians(u.sigma_yaw_deg) ** 2 \
             + Rot @ D @ Rot.T
 
-    def _process_det(self, d: Det, stamp: float) -> None:
-        pose = self.ping_buf.at(d.t_row) or self.odom_buf.at(d.t_row)
-        if pose is None:
-            self._count("no_pose_at_stamp")
-            return
-        bx, by, yaw = pose
+    def _process_det(self, d: Det, pose: Tuple[float, float, float], stamp: float) -> None:
+        bx, by, yaw = pose                           # resolved at arrival (ingest_detections)
         zx, zy = self.aligner.to_map(d.x, d.y)
         cell = int(self.geom.cell_of(zx, zy))
         if cell < 0 or not self.inside[cell]:
@@ -362,8 +462,13 @@ class Belief:
         if not valid_covariance(R):
             self._count("bad_covariance")
             R = self._fallback_cov(yaw, b, rng)
-        if d.class_name not in self.contacts.class_index and self.contacts.other_idx < 0:
-            self._count("unknown_class")
+        if d.class_name not in self.contacts.class_index:
+            if self.contacts.other_idx < 0:
+                self._count("unknown_class")
+            else:
+                # not a rejection: the detection is kept under "other". Counted, because a
+                # consumer that keys its model on the class then sees none of the real classes.
+                self.stats["detections_class_other"] += 1
         det_id = f"{int(round(stamp * 1e9))}:{d.id}"
         c, created = self.contacts.add_detection(d.t_row, self.epoch, k, d.score,
                                                  np.array([zx, zy]), R, det_id, d.class_name,

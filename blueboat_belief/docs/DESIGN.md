@@ -1,30 +1,45 @@
-# DESIGN: decisions behind BlueBoat-Belief (why the code is the way it is)
+# DESIGN: why BlueBoat-Belief is built the way it is
 
-The specification is `MATH.md` and the interfaces are in `topics.md`. The history is
-`PHASE1_MEMO.md` (facts) and `PHASE2_DESIGN.md` (the design and the owner's answers). All of
-this is model-conditional (CM-13).
+The specification is `MATH.md`, the interface contract is `topics.md`, the design brief is
+`BELIEF_BRIEF.md`. This page holds the decisions in force, the architecture and model choices,
+the known limitations, the scientific status of every component and what is still to be
+decided. Everything here is model-conditional (CM-13).
 
-> **Priority: detector calibration** (owner, 2026-11-04). Perception's calibration is the identity,
-> and no calibration flag reaches Belief. Belief's contact log-odds treat the raw score as `q`, so
-> `p_exists` and `p_target` are **not probabilities** until a calibrated detector is deployed and
-> `detector.calibrated` is set. This blocks every probabilistic claim (REQUESTS R-1, TODO [P0]).
+> **Priority: detector calibration.** Perception's calibration is the identity. Belief's contact
+> log-odds treat the raw score as `q`, so `p_exists` and `p_target` are **not probabilities**
+> until a calibrated detector is deployed and `detector.calibrated` is set. This blocks every
+> probabilistic claim (`REQUESTS.md` R-1, `TODO.md` [P0]).
 
-## 1. Owner decisions (2026-11-04)
+## 1. Decisions in force
 
-| # | Decision | Consequence in the code |
+Owner decisions; the IDs are cited in code and docs.
+
+| # | Decision | Where in the code |
 |---|---|---|
-| D-1 | The brief wins on design where it disagrees with the root `CLAUDE.md` / synthesis; facts follow the repository | Inputs and outputs follow brief §3 / §4.2 |
-| D-2 | Inputs: `/sss_processor/processed`, `/sss_ai/detections`, `/blueboat/odom`, `/mavros/global_position/global` + the survey-area file. **Deviates from CM-9** ("image records only") | `ros/belief_node.py` subscriptions |
-| D-3 | odom → map: online translation-only median fit, latched; config override | `core/alignment.py` |
-| D-4 | Survey area: world `metadata.yaml`, or a file of the same shape | `core/area.py`, `SURVEY_AREA_FORMAT.md` |
-| D-5 | No context pack, no v1 | v1 comparisons are [NOT AVAILABLE]; closed forms replace them |
-| D-6 | After Paull 2013 and Bourgault 2006 were read in the primary text: **default `rho.ordering = paull_pairwise`** (Paull's c¹ ≥ c²) | `core/config.py`, `models.combine_miss`; `sequential` stays a switch |
-| D-7 | **Turn back-scan gating** (Paull §II-C; r* = v/|ω|) | `core/turn.py`, `Belief._process_ping` |
-| D-8 | A minimal survey-area tool now | `cli/make_area.py` (`blueboat-belief-make-area`) |
-| D-9 | Bearing-resolved ρ (Bourgault §4.3 smoothness) recorded as a TODO, not built | keeps `belief_grid/0` stable for the Replanner reconciliation |
+| D-1 | The brief wins on design where it disagrees with the root `CLAUDE.md` or `project_synthesis.md`; facts follow the repository | — |
+| D-2 | Primary inputs: `/sss_processor/processed`, `/sss_ai/detections`, `/blueboat/odom`, `/mavros/global_position/global`, plus the survey-area file | `ros/belief_node.py` subscriptions |
+| D-3 | odom → map: online translation-only median fit, latched once valid (Q-14); a config override exists | `core/alignment.py` |
+| D-4 | Survey area: a world `metadata.yaml`, or a `blueboat_survey_area/1` file of the same shape; its `geo_anchor` is the datum (Q-2) | `core/area.py`, `SURVEY_AREA_FORMAT.md` |
+| D-6 | `rho.ordering: paull_pairwise` (Paull's c¹ ≥ c²) is the default; `sequential` stays a switch. Opposite looks fold onto the line angle (`fold_opposite`, Q-10) | `core/config.py`, `models.combine_miss` |
+| D-7 | Turn back-scan gating (Paull §II-C; r* = v/\|ω\|) | `core/turn.py` |
+| D-8 | A minimal survey-area tool (`blueboat-belief-make-area`, also `--from-mission`) | `cli/make_area.py` |
+| D-9 | Bearing-resolved ρ is a TODO, not built, so `belief_grid/0` stays stable | — |
+| D-10 | Image records are an optional companion input, read for detector coverage only; the array heuristic stays the fallback (`coverage.source: auto`) | `core/coverage.RecordTimeline`, `Belief.ingest_record` |
+| D-11 | `rosbags` lives in the project venv; the gate runs in the venv and on the system numpy | `test/gate.sh` |
+| Q-1 | `BeliefGrid` is TRANSIENT_LOCAL depth 1 **and** republished at 1 Hz | `ros/belief_node.py` |
+| Q-3 | Per-sector miss accounting (`aspect_log_miss`) is published | `core/grid.py` |
+| Q-4 | Synthetic inputs live only in `test/`; no ground-truth reader in Belief | `test/scenarios.py` |
+| Q-6 | One gate runner: `test/smoke_test.py` | `test/` |
+| Q-7 | Negative evidence is gated on detector coverage; `require_detector: false` is development only | `core/coverage.py` |
+| Q-8 | The raw score is used as `q`, with `detector_calibrated: false` published | `core/contract.py` |
+| Q-9 | The dummy class `dummy_center` is ignored and its arrays give no coverage | `core/config.py` |
+| Q-11 | Unknown-altitude rows (`water_depth == 0.22`) give no evidence (counted) | `core/belief.py` |
+| Q-12 | `record_inputs:=true` records Belief's inputs into its data folder | `launch/belief_launch.py` |
+| Q-13 | The survey polygon is published (`area_x`, `area_y`) | `core/contract.py` |
 
-The answers Q-1 … Q-14 (`PHASE2_DESIGN.md` §12) are applied as recommended, plus the calibration
-priority (Q-8).
+Kept by the implementation and reported, each keeping the model as it is: the pairwise rule with
+its order dependence beyond two looks stated (`MATH.md` §7); the sequential contact update
+(`MATH.md` §9); no field of `belief_grid/0` added since the contract was implemented.
 
 ## 2. Architecture choices
 
@@ -48,7 +63,7 @@ priority (Q-8).
 
 ## 3. Model choices (details in `MATH.md`)
 
-1. **Hybrid grid + contacts** (brief §6.1). The grid takes only misses. Contacts take positive
+1. **Hybrid grid + contacts** (brief §6.1, D-1). The grid takes only misses. Contacts take positive
    evidence and their own looks.
 2. **Looks, not pings**, with **same-look replacement computed from the look's opening
    values.**
@@ -72,7 +87,11 @@ priority (Q-8).
      stride 128, so by then every image a ping belongs to has arrived, together with all of its
      detections.
    - The cost is a latency of about two images (seconds) before the grid shows a pass.
-   - It is a stated heuristic, because arrays carry only their newest row time (REQUESTS R-2).
+   - It is a stated heuristic, because arrays carry only their newest row time.
+   - It is the fallback (D-10). When Perception's image records arrive, they give the exact row
+     span and status of each image, and the release rule keeps the same latency (`MATH.md`
+     §8.2). A record is applied only after its own detection array, so the belief does not
+     depend on which topic is delivered first.
 6. **The dummy detector is not a detector.** Its arrays always hold `dummy_center`, so Belief
    marks those arrays non-coverage (geometry-only) and ignores the detections (owner Q-9).
 7. **Contacts.**
@@ -96,14 +115,73 @@ priority (Q-8).
 | L2 | PFA is **neglected** (0): the Bourgault miss update is the PFA = 0 special case | `p_background` | a measured PFA at the 0.10 operating point (`pd.pfa` exists) |
 | L3 | Raw scores used as `q`; base rate π = 0.5 unverified | `p_exists`, `p_target` | **the calibration priority** (R-1) |
 | L4 | ρ is Paull's **assumed** linear rule (§III-C "it is assumed"); its look-by-look application and the min over sectors are heuristics beyond two looks | coverage after multi-aspect passes | E3 data |
-| L5 | Coverage gating infers image spans from array stamps | which pings count as searched | R-2 meta companion |
+| L5 | Without image records, coverage gating infers image spans from array stamps: the first image after a start is never credited (3.9 % of one 100 m line) and a "no pixels" image is credited | which pings count as searched, for a detections-only publisher | the image records (used when present, `MATH.md` §8.2) |
 | L6 | Nearest-neighbour association, no clutter model (not an RFS filter) | dense or cluttered scenes | PDA / labelled RFS (brief §17.7), if scenes demand it |
 | L7 | Independent cells; background and contacts treated as independent when rendering | `p_target`, disc query | inherent to the hybrid approximation (Thrun 2003) |
 | L8 | Class update = q-weighted Dirichlet counts, not Bayes | `class_probabilities` | a detector confusion matrix |
-| L9 | Detections are georeferenced with the GCS compass heading; pings with odom yaw | a systematic offset between positive and negative evidence if the two disagree | LOCAL_CHECKLIST L-4 |
+| L9 | Detections are georeferenced with the GCS compass heading; pings with odom yaw | a systematic offset between positive and negative evidence if the two disagree | real-boat check L-4 (`TODO.md`) |
 | L10 | `depth_m` is the boat's water depth assigned to the swath (flat floor); `last_intensity_db` is the device's scale (no gain compensation) | display / analysis only | — |
-| L11 | Performance on the cloud machine: ~0.65 ms per swath, near the 1 ms budget | live headroom | measure on the laptop (LOCAL_CHECKLIST) |
-| L12 | Nothing has run in a ROS graph | everything live | LOCAL_CHECKLIST |
-| L13 | ρ is quantised by 30° sectors (steps of 1/3). Bourgault §4.3 warns that stepped models make a planner's objective jagged | heading optimisation in the Replanner | bearing-resolved ρ, a [P2] contract addition |
-| L14 | The turn gate uses Perception's `r*` convention, and its 1 s window lags turn onset | the first ~1 s of each turn | live check (LOCAL_CHECKLIST B-3) |
-| L15 | Paull's confidence (`P(m = M)`, 0.5–1) is not PD, so Paull's Eq. 9 is no consistency check here (`MATH.md` §13.1) | interpretation only | — |
+| L11 | Python core: 0.50 ms per swath offline on the laptop; live in Gazebo 16 % of one core, 110 MB (`VALIDATION_REPORT.md`) | headroom with much larger grids only | measure again if the area or resolution grows |
+| L12 | Run under ROS on an isolated domain with synthetic publishers, live in Gazebo with Perception's dummy detector, and on one real recording through the real sonar processor (`VALIDATION_REPORT.md`). **No run with a real detector exists**: none is trained | every claim about detections, contacts and negative evidence on real data | a trained, calibrated detector (Perception) |
+| L13 | ρ is quantised by 30° sectors (steps of 1/3). Bourgault §4.3 warns that stepped models make a planner's objective jagged. On one real leg, 12.7 % of the cells seen were credited as more than one look because the heading crossed sector boundaries (`VALIDATION_REPORT.md` §4) | heading optimisation in the Replanner; coverage along a track that is not straight | bearing-resolved ρ, a [P1] additive contract field (`TODO.md`) |
+| L14 | The turn gate uses Perception's `r*` convention, and its 1 s window lags turn onset | the first ~1 s of each turn | a real run with its own time base (`TODO.md` turn gate) |
+| L15 | Paull formalises confidence as `P(m = M)` (0.5–1), so Paull's Eq. 9 is no consistency check here (`MATH.md` §13.1) | interpretation only | — |
+| L16 | **Coverage depends on the order of three or more looks** (0.931 against 0.877 for the same three looks; `MATH.md` §7). Two-pass orthogonal is order-independent | `coverage`, `area_cumulative_pd` must not be used to compare survey policies | ground-truth evaluation (D7); a sourced n-look rule, if one exists |
+| L17 | The contact update is sequential while the grid is pairwise: a stronger later detection on the same line does not raise `p_exists` (`MATH.md` §9) | `p_exists` only; `state` and `max_confidence` are unaffected | a pairwise form for contacts, once scores are calibrated |
+| L18 | Perception's near-range slant mask (`near_range_mask_m`, 0 by default) is reported, not modelled | near-range coverage would be over-credited if the mask exceeded the altitude | apply the record's searched range per side |
+| L19 | `/diagnostics`, the grid and the displays are paced by wall time. In a slowed simulation they are published more often per simulated second | bandwidth only | — |
+| L20 | The detector's classes must be listed in `detector.class_names`; anything else becomes `other` (counted, and the node warns once) | a consumer that keys its model on the class | set the list from the trained model |
+
+## 5. Scientific status of each component
+
+What the literature supports, what the project assumed, and what evidence a thesis claim would
+need. Read status of every source: `REFERENCES.md`.
+
+| Component | Formulation | Source and status | Unvalidated | Evidence a claim needs |
+|---|---|---|---|---|
+| Negative evidence on the grid | `p⁺ = p(1−PD)/(p(1−PD)+1−p)` in log-odds; `Q = ∏(1 − PD_i)` | Bourgault 2006 Eqs. 4–7 (read); Yordanova & Gips 2020 Eq. 2 (read). Bourgault keeps one normalised target PDF; Belief keeps independent cells | PD itself; cell independence | a fitted PD(range) with intervals; predicted against observed misses on labelled runs |
+| PD(range) | trapezoid, 0.7 on 3–25 m, 3 m ramps | **placeholder** (brief §10); fitting precedent Nguyen & Murdoch 2012 (record only) | all of it | labelled looks of known targets, split by world |
+| PFA | 0 | Bourgault's "perfect discrimination" (assumption) | whether false alarms are negligible at score ≥ 0.10 | false-alarm density on target-free seabed |
+| Looks, not pings | a run of pings from one sector, gaps ≤ 20 s | Paull 2013 Eqs. 15–16 (read); timeout and 30° sectors are engineering choices | the timeout | — |
+| Dependence between looks ρ | linear in the angle between look lines, pairwise with the stronger look first | Paull 2013 Eqs. 22–24, **stated there as an assumption** (read) | the rule; its extension beyond two looks | E3: the same targets from measured bearings |
+| Contact existence | `L = logit q`; `+ρ(logit q − logit π)` per detected look; `+ln(1 − ρ·PD)` per missed look | base-rate shift (Saerens 2002, record); existence recursions with clutter (Mušicki 1994, Ristic 2013, records) | every number: scores are raw, π = 0.5 is a placeholder; no clutter model | a calibrated detector; reliability of `p_exists` on held-out worlds |
+| Contact position | information-form fusion, one observation per look, common-mode error removed and added once | Perception's `geometric_v1` sigmas (assumed) | the sigmas | position error and ellipse coverage against known objects |
+| Detector coverage | a ping counts only where a detector that ran spans it | owner Q-7 and D-10; brief §17.9 | on a live run with a real detector | share of pings credited, live |
+| Turn gate | inner-side samples beyond `r* = v/\|ω\|` add nothing | Paull 2013 §II-C (read); radius as Perception uses it (Cobra 1992, record) | the 1 s estimator lag; behaviour on straight lines | a real run with its own time base |
+| odom → map | median of GPS − odom pairs, latched; yaw 0 | real odom yaw is absolute ENU (`robot_interface.py`) | on a real run (L-1) | compass against odom yaw on a run bag |
+
+**What Belief can claim today.** Its equations are implemented as specified and reproduce
+closed forms; the node publishes what the core computes; a replay is deterministic. **What it
+cannot claim:** any probability (scores are raw), any detection performance (PD is a
+placeholder), anything about real detections (none exist).
+
+**Assumptions built in.** PD(r), PFA = 0, π = 0.5, the linear ρ and its extension beyond two
+looks, the 20 s look timeout, 30° sectors, the prior density 5 /ha, Perception's sigmas,
+independent cells.
+
+## 6. Missing evidence, and who provides it
+
+| Missing | Blocks | Who |
+|---|---|---|
+| A trained detector | every statement about detections, contacts and negative evidence on real data | Perception |
+| Its calibration and base rate | every probability | Perception (`REQUESTS.md` R-1) |
+| E3 (heading response) | ρ, aspect windows, the claim that aspect matters | field work |
+| A fitted PD and PFA | coverage numbers | Evaluation, on labelled runs |
+| A Gazebo run of a replanner-owned path in a built world | E4 | SSS-Sim (Control R-3), then the Replanner |
+| The Evaluation module | E4 scoring against ground truth | not owned |
+
+**Thesis risks seen from Belief.** Every result is model-conditional (a simulator-trained
+detector, an assumed PD, an assumed ρ, evaluated in the same simulator; CM-13). "Aspect-aware"
+may show no effect, and a positive effect on Belief's ρ is still a property of Paull's assumed
+rule until E3. Modelled coverage is order-dependent, so only ground truth compares policies.
+Stating H1 (revisit early) and H2 (choose the bearing) as separate claims keeps a defensible
+result either way.
+
+## 7. Decisions still open (owner)
+
+| # | Decision | Blocks |
+|---|---|---|
+| O-1 | `detector.class_names` once a model is trained, and who maps detector classes to the Replanner's aspect families (Replanner RQ-6) | aspect logic in the Replanner |
+| O-2 | The prior density: Belief's 5 /ha is a planner-model placeholder; the Replanner's dev-loop worlds hold 10 /ha. Keep planner and world models separate; do not tune the prior to the world | `p_background`, the Replanner's background value |
+| O-3 | Bearing-resolved ρ (`aspect_bearing_deg`, additive): agree with the Replanner | D-9 |
+| O-4 | Survey speed 0.5 or 1.0 m/s (`project_synthesis.md` §8.5 says 1.0; the Replanner uses 0.5) | image cadence, latency, budgets |

@@ -2,7 +2,7 @@
 
 SSS-Sim style: ``check()`` prints ``[PASS]``/``[FAIL]`` and stops at the first failure (exit 1);
 ``[N]`` section headers; a visible ``SKIP`` when an optional dependency is missing; the run ends
-with ``ALL CHECKS PASSED`` and the check count. Sections follow docs/PHASE2_DESIGN.md §7 and
+with ``ALL CHECKS PASSED`` and the check count. Sections follow docs/DESIGN.md (Q-6) and
 brief §11 (closed forms, determinism, localisation, rejections, message layouts, performance).
 """
 
@@ -13,6 +13,7 @@ import importlib
 import importlib.abc
 import importlib.util
 import io
+import itertools
 import json
 import math
 import os
@@ -480,6 +481,57 @@ def section_grid() -> None:
         _look(g, 30.0 * i, i * math.pi / 6, 1, 0.7)
     check("p_background clamped at p_min on read", close(g.p_background()[42], 1e-5, 1e-5))
     check("NaN outside the area only", not np.isnan(g.p_background()).any())
+    # numerical form of the pairwise rule (MATH §7): exact no-op at rho = 0, Q never rises
+    from blueboat_belief.core.models import combine_miss
+
+    lq = np.log1p(-np.array([0.0, 0.3, 0.7, 0.7, 0.2]))
+    out = combine_miss(lq, np.array([1.0, 0.5, 0.0, 0.0, 1.0]), np.array([0.7, 0.7, 0.7, 0.9, 0.1]),
+                       "paull_pairwise")
+    exp = np.log([0.3, 0.3 * (1 - 0.5 * 0.3), 0.3, 0.1, 0.8 * 0.9])
+    check("combine_miss closed forms: fresh, stronger at rho 1/2, equal repeat, stronger repeat, weaker independent",
+          np.allclose(out, exp, atol=1e-12) and out[2] == lq[2], f"{np.round(-np.expm1(out), 6).tolist()}")
+    drift = 0.0
+    for pd0 in (0.05, 0.123456789, 0.3, 0.35, 0.5, 0.6, 0.7, 0.9, 0.95):
+        g, _ = _grid()
+        _look(g, 1.0, 0.0, 1, pd0)
+        l0, e0 = float(g.lnq[42]), float(g.ell[42])
+        for i in range(1000):                   # yaw 0 / pi, port / starboard: all on one line
+            _look(g, 100.0 * (i + 1), 0.0 if i % 2 else math.pi, 1 if i % 3 else -1, pd0)
+        drift = max(drift, abs(float(g.lnq[42]) - l0), abs(float(g.ell[42]) - e0))
+        if pd0 == 0.7:
+            n_rep = int(g.n_looks[42])
+    check("rho = 0 repeats (1000 per PD, both sides of one line): ln Q and the log-odds stay bit-identical",
+          drift == 0.0 and n_rep == 1001, f"max drift {drift:.1e}, n_looks {n_rep}")
+    rng = np.random.default_rng(11)
+    for ordering in ("paull_pairwise", "sequential"):
+        up = 0.0
+        for _ in range(400):
+            g, _ = _grid(rho={"ordering": ordering})
+            prev = 0.0
+            for i in range(int(rng.integers(2, 9))):
+                _look(g, 100.0 * (i + 1), math.radians(30.0 * float(rng.integers(0, 12))),
+                      int(rng.choice([1, -1])), float(rng.uniform(0.0, 0.95)))
+                up = max(up, float(g.lnq[42]) - prev)
+                prev = float(g.lnq[42])
+        check(f"{ordering}: ln Q never rises over 400 random look sequences", up <= 0.0, f"largest step {up:.1e}")
+
+    # order dependence beyond two looks: documented, kept, pinned (MATH §7)
+    def _cov(angles_deg) -> float:
+        g, _ = _grid()
+        for i, a in enumerate(angles_deg):
+            _look(g, 100.0 * (i + 1), math.radians(a), 1, 0.7)
+        return -math.expm1(float(g.lnq[42]))
+
+    check("three looks, same set, two orders: 0,90,30 -> 0.9310 and 0,30,90 -> 0.8773 (MATH §7 table)",
+          close(_cov((0, 90, 30)), 1 - 0.09 * (1 - 0.7 / 3), 1e-9)
+          and close(_cov((0, 30, 90)), 1 - 0.3 * (1 - 0.7 / 3) * (1 - 1.4 / 3), 1e-9),
+          f"{_cov((0, 90, 30)):.4f} / {_cov((0, 30, 90)):.4f}")
+    four = [_cov(p) for p in itertools.permutations((0, 30, 60, 90))]
+    check("four looks 0,30,60,90 in every order: coverage between 0.8648 and 0.9471",
+          close(min(four), 0.8648, 1e-4) and close(max(four), 0.9471, 1e-4), f"{min(four):.4f} .. {max(four):.4f}")
+    two_pass = [_cov(p) for p in itertools.permutations((0, 180, 90, 270))]
+    check("two-pass orthogonal with both sides is order-independent: 1 - 0.3^2 in all 24 orders",
+          all(close(c, 0.91, 1e-12) for c in two_pass), f"{min(two_pass):.6f} .. {max(two_pass):.6f}")
 
 
 # ============================================================================ [7] contacts
@@ -910,8 +962,10 @@ def section_localisation() -> None:
 # ============================================================================ [14] rejections
 def section_rejections() -> None:
     from blueboat_belief.core.area import area_from_dict
-    from blueboat_belief.core.belief import REASONS, Belief, Det, DetArray, FixObs, OdomObs, PingObs
+    from blueboat_belief.core.belief import (REASONS, Belief, Det, DetArray, FixObs, ImageRec,
+                                             OdomObs, PingObs)
     from blueboat_belief.core.config import BeliefConfig
+    from blueboat_belief.ros import adapters as ad
     from test import scenarios as sc
 
     print("[14] rejections: every bad-input path counted, no exception escapes")
@@ -954,6 +1008,9 @@ def section_rejections() -> None:
     b.ingest_ping(rep(t=t_last + 170.0, x=3.0))                             # +100 ping expires (no array)
     b.ingest_detections(DetArray(t_last + 171.0, (Det("7", t_last + 170.5, 30.0, 10.0, 0.0, "block", 0.5, R),)))
     b.ingest_detections(DetArray(t_last + 172.0, (Det("8", t_last + 90.0, 30.0, 10.0, 0.0, "block", 0.5, R),)))
+    b.ingest_record(ImageRec("s/0", float("nan"), t_last, True))            # bad_record (no span)
+    b.ingest_record(ImageRec("s/1", t_last + 5.0, t_last, True))            # bad_record (t_min > t_max)
+    b.reject_record()                                                       # bad_record (unreadable)
     b.finish()
     for p in [rep(t=t_last + 300 + i, x=0.0, y=0.0) for i in range(25)]:
         b.ingest_ping(p)                                                    # frozen_pose
@@ -964,9 +1021,20 @@ def section_rejections() -> None:
     rng = np.random.default_rng(0)
     ok = True
     try:
+        junk = ("", "{", "null", "[1, 2]", '{"schema": "x"}', '{"schema": "blueboat_perception/image_record/1"}',
+                '{"schema": "blueboat_perception/image_record/1", "time": {"t_min_s": null, "t_max_s": 3}, "processing": {}}',
+                '{"schema": "blueboat_perception/image_record/1", "time": {"t_min_s": NaN, "t_max_s": 3}, "processing": 7}',
+                '{"schema": "blueboat_perception/image_record/1", "time": {"t_min_s": true, "t_max_s": "3"}, "processing": {}}',
+                b"\xff\xfe", {"data": 5}, {"data": None}, 12, None)
+        for j in junk:                                           # image records: never raise
+            rec = ad.record_from_msg(j if isinstance(j, dict) else {"data": j})
+            b.reject_record() if rec is None else b.ingest_record(rec)
         for _ in range(200):
-            k = rng.integers(0, 3)
-            if k == 0:
+            k = rng.integers(0, 4)
+            if k == 3:
+                b.ingest_record(ImageRec("f", float(rng.uniform(-5, 1e3)), float(rng.uniform(-5, 1e3)),
+                                         bool(rng.integers(0, 2)), bool(rng.integers(0, 2))))
+            elif k == 0:
                 n = int(rng.integers(0, 5))
                 b.ingest_ping(rep(t=float(rng.uniform(0, 1e3)), port_y=rng.normal(size=n).astype(np.float32),
                                   port_db=rng.normal(size=int(rng.integers(0, 5))).astype(np.float32)))
@@ -991,7 +1059,7 @@ def section_performance() -> None:
     from blueboat_belief.io.snapshot import encode_npz
     from test import scenarios as sc
 
-    print("[15] performance (indicative only: cloud machine, not the target laptop)")
+    print("[15] performance (indicative: one run on this machine, under whatever load it has)")
     b = Belief(BeliefConfig().with_values(coverage={"require_detector": False}),
                area_from_dict(sc.area_dict(-10, -40, 110, 40)))
     pings = sc.straight_pass(0, 0, 0.3, 1.0, 50.0, h=0.7)
@@ -1054,13 +1122,32 @@ def section_packaging() -> None:
     spec = importlib.util.spec_from_file_location("belief_launch", ROOT / "launch" / "belief_launch.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    check("launch imports offline; record command covers the four inputs",
-          mod.record_command("/tmp/x")[-4:] == list(mod.INPUT_TOPICS) and len(mod.INPUT_TOPICS) == 4)
+    check("launch imports offline; record command covers the four inputs and the image records",
+          mod.record_command("/tmp/x")[-5:] == list(mod.INPUT_TOPICS) and len(mod.INPUT_TOPICS) == 5
+          and mod.INPUT_TOPICS[-1] == "/sss_ai/image_records")
+    from blueboat_belief.cli import replay as _rp
+    check("the replay CLI reads exactly the topics the launch file records",
+          set(_rp.TOPICS) == set(mod.INPUT_TOPICS))
     node = (ROOT / "blueboat_belief" / "ros" / "belief_node.py").read_text()
     for needle in ('"/sss_processor/processed"', '"/sss_ai/detections"', '"/blueboat/odom"',
-                   '"/mavros/global_position/global"', '"~/belief_grid"', '"~/query_belief"',
-                   "DurabilityPolicy.TRANSIENT_LOCAL", "ReliabilityPolicy.BEST_EFFORT"):
+                   '"/mavros/global_position/global"', '"/sss_ai/image_records"', '"~/belief_grid"',
+                   '"~/query_belief"', "DurabilityPolicy.TRANSIENT_LOCAL", "ReliabilityPolicy.BEST_EFFORT"):
         check(f"node declares {needle}", needle in node)
+    check("node: detections are subscribed before image records (array handled first in a tie)",
+          node.index('"/sss_ai/detections"') < node.index('"/sss_ai/image_records", self._on_record'))
+    check("node: outputs paced by a steady clock; SIGINT/SIGTERM are normal stops; fatal start exits non-zero",
+          "ClockType.STEADY_TIME" in node and "ExternalShutdownException" in node
+          and "sys.exit(code)" in node and "dynamic_typing=True" in node)
+    check("node: grid_seq advances only where the BeliefGrid is published",
+          node.count("self.seq += 1") == 1 and "def _grid_dict" not in node)
+    from blueboat_belief.core.config import BeliefConfig as _BC
+    from blueboat_belief.ros.adapters import unknown_parameters
+    decl = _BC().to_flat()
+    check("a misspelt parameter name is reported; ROS's own parameters are not",
+          unknown_parameters({"coverage.requir_detector": 1, "use_sim_time": 1, "pd.plateau": 1,
+                              "qos_overrides./tf.publisher.depth": 1}, decl) == ["coverage.requir_detector"])
+    check("launch records with --topics (positional topic names are deprecated in Jazzy)",
+          "--topics" in mod.record_command("/tmp/x"))
     ip = (ROOT.parent / "blueboat_belief_interfaces" / "CMakeLists.txt").read_text()
     check("interfaces CMake generates the three types", all(s in ip for s in
           ('"msg/BeliefGrid.msg"', '"msg/BeliefContact.msg"', '"srv/QueryBelief.srv"')))
@@ -1249,6 +1336,35 @@ def section_tools() -> None:
         check("make-area --from-world copies geo_anchor and limits (no ground truth)",
               rc4 == 0 and fw.lat0 == world["geo_anchor"]["lat0"] and fw.local == (-15.0, -25.0, 35.0, 45.0)
               and "objects" not in (Path(tmp) / "fromworld.yaml").read_text())
+        # from a BlueBoat-Replanner mission file (its config/mission_example.yaml, verbatim polygon)
+        from blueboat_belief.core.geo import latlon_to_local_en
+        poly = [[34.5, 133.5], [34.5, 133.5013], [34.50054, 133.5013], [34.50054, 133.5]]
+        mission = {"mission": {"name": "devloop_example", "condition": "C3", "areas": [poly],
+                               "config": {"planning_depth_m": 2.0}}}
+        mfile = Path(tmp) / "mission.yaml"
+        mfile.write_text(yaml.safe_dump(mission))
+        rc5 = make_area(["--out", str(Path(tmp) / "frommission.yaml"), "--from-mission", str(mfile)])
+        fm = load_area_file(str(Path(tmp) / "frommission.yaml"))
+        en = [latlon_to_local_en(la, lo, 34.5, 133.5) for la, lo in poly]
+        ex, ny = max(e for e, _ in en), max(n for _, n in en)
+        check("make-area --from-mission: the area is the mission polygon's bounding rectangle",
+              rc5 == 0 and fm.name == "devloop_example" and (fm.lat0, fm.lon0) == (34.5, 133.5)
+              and fm.local[:2] == (0.0, 0.0) and 0 <= fm.local[2] - ex < 0.01 and 0 <= fm.local[3] - ny < 0.01,
+              f"{fm.local[2]:.2f} x {fm.local[3]:.2f} m")
+        rc6 = make_area(["--out", str(Path(tmp) / "margin.yaml"), "--from-mission", str(mfile), "--margin-m", "20",
+                         "--anchor", "34.5001", "133.5002"])
+        mg = load_area_file(str(Path(tmp) / "margin.yaml"))
+        check("--margin-m grows it on every side; --anchor moves the datum, not the area",
+              rc6 == 0 and (mg.lat0, mg.lon0) == (34.5001, 133.5002)
+              and close((mg.local[2] - mg.local[0]) - (fm.local[2] - fm.local[0]), 40.0, 1e-3)
+              and close((mg.local[3] - mg.local[1]) - (fm.local[3] - fm.local[1]), 40.0, 1e-3))
+        bad = {"mission": {"name": "two", "areas": [poly, poly]}}
+        (Path(tmp) / "two.yaml").write_text(yaml.safe_dump(bad))
+        rc7 = make_area(["--out", str(Path(tmp) / "two_out.yaml"), "--from-mission", str(Path(tmp) / "two.yaml")])
+        rc8 = make_area(["--out", str(Path(tmp) / "both.yaml"), "--from-mission", str(mfile), "--from-world", str(wdir)])
+        check("a mission with two areas, or two sources at once, is refused (exit 2, nothing written)",
+              rc7 == 2 and rc8 == 2 and not (Path(tmp) / "two_out.yaml").exists()
+              and not (Path(tmp) / "both.yaml").exists())
     b, _ = _run_scenario()
     cov = b.grid.coverage().astype(np.float64)[b.inside]
     q = -np.log1p(-np.clip(cov, 0, 1 - 1e-12))
@@ -1260,13 +1376,316 @@ def section_tools() -> None:
           set(s) == {"area_cumulative_pd", "contacts", "contacts_confirmed", "contacts_retired", "alignment_valid"})
 
 
+# ============================================================================ [21] image records
+def _records_run(source="auto", records=True, record_first=False, searched=True, dummy=False,
+                 with_arrays=True, speed=0.5, finish=True, stop_after=None):
+    """One straight 100 m pass with one detection array (and one image record) per image."""
+    from blueboat_belief.core.area import area_from_dict
+    from blueboat_belief.core.belief import Belief
+    from blueboat_belief.core.config import BeliefConfig
+    from test import scenarios as sc
+
+    cfg = BeliefConfig().with_values(alignment={"origin_lat": sc.LAT0, "origin_lon": sc.LON0},
+                                     coverage={"source": source})
+    b = Belief(cfg, area_from_dict(sc.area_dict(-30, -30, 130, 30)))
+    pings = sc.straight_pass(0.0, 0.0, 0.0, speed, 100.0 / speed)
+    period = 2.135 / speed                       # the GCS image stride: 128 rows of 16.68 mm
+    arrays = sc.arrays_for(pings, [(40.0, 8.0)], period_s=period)
+    recs = sc.records_for(pings, arrays, period_s=period, searched=searched, dummy=dummy) if records else []
+    evs = sc.events(pings, sc.odom_for(pings), (), arrays if with_arrays else (), records=recs,
+                    record_first=record_first)
+    if stop_after is not None:
+        evs = [e for e in evs if e[0] <= stop_after]
+    sc.feed(b, evs)
+    if finish:
+        b.finish()
+    return b, pings, arrays, recs
+
+
+def section_records() -> None:
+    from blueboat_belief.core.contract import to_grid_dict
+    from blueboat_belief.core.coverage import RecordTimeline
+    from blueboat_belief.io.snapshot import encode_npz
+    from blueboat_belief.ros import adapters as ad
+
+    print("[21] image records as the optional coverage source (MATH §8.2; owner 2026-11-12)")
+    mp = lambda b: json.loads(to_grid_dict(b, 1)["model_params_json"])  # noqa: E731
+    snap = lambda b: encode_npz(to_grid_dict(b, 1))                     # noqa: E731
+
+    b_arr, pings, arrays, _ = _records_run(source="arrays", records=False)
+    b_rec, _, _, recs = _records_run()
+    head = sum(1 for p in pings if p.t <= arrays[0].t)
+    check("auto with records: coverage_source = records; without: arrays",
+          mp(b_rec)["coverage_source"] == "records" and mp(b_arr)["coverage_source"] == "arrays")
+    check("array heuristic: the first image is never credited (its pings stay geometry-only)",
+          b_arr.stats["pings_geometry_only"] >= head > 0, f"{head} pings in the first image")
+    check("records: exactly the first image's pings gain miss credit",
+          b_rec.stats["pings_covered"] - b_arr.stats["pings_covered"] == head
+          and b_rec.stats["pings"] == b_arr.stats["pings"] == len(pings),
+          f"covered {b_arr.stats['pings_covered']} -> {b_rec.stats['pings_covered']} of {len(pings)}")
+    check("records: every record searched, none waited for a missing array, no overlap violation",
+          b_rec.stats["records"] == b_rec.stats["records_searched"] == len(recs)
+          and b_rec.stats["records_without_array"] == 0 and b_rec.stats["records_overlap"] == 0)
+    check("records: the detection still makes one contact (detections come from the arrays only)",
+          len(b_rec.contacts.contacts) == 1 and len(b_arr.contacts.contacts) == 1)
+    check("calibration flag observed from the records; null when no record was seen",
+          mp(b_rec)["detector_calibrated_observed"] is False and mp(b_arr)["detector_calibrated_observed"] is None
+          and mp(b_rec)["detector_calibrated"] is False)
+
+    b_first, *_ = _records_run(record_first=True)
+    check("record before its array, or after: byte-identical belief (MATH §8.2 item 3)",
+          snap(b_first) == snap(b_rec) and b_first.stats == b_rec.stats)
+    b_again, *_ = _records_run()
+    check("deterministic with records: byte-identical on repeat", snap(b_again) == snap(b_rec))
+
+    # two consecutive images without pixels: the pings only they contain are not searched
+    gap = lambda k: k not in (5, 6)                                    # noqa: E731
+    b_null, *_ = _records_run(searched=gap)
+    only = sum(1 for p in pings if arrays[4].t < p.t <= arrays[5].t)
+    check("two images with detections: null -> the pings only they hold lose their miss credit",
+          b_rec.stats["pings_covered"] - b_null.stats["pings_covered"] == only > 0
+          and b_null.stats["records_unsearched"] == 2, f"{only} pings")
+    check("the array heuristic cannot see it: the same empty arrays are credited",
+          b_arr.stats["pings_covered"] == len(pings) - head - sum(1 for p in pings if p.t > arrays[-1].t))
+
+    b_dummy, *_ = _records_run(dummy=True)
+    check("records from a dummy detector: nothing is searched, coverage stays 0",
+          b_dummy.stats["pings_covered"] == 0 and b_dummy.stats["records_unsearched"] == len(recs)
+          and b_dummy.area_cumulative_pd() == 0.0)
+
+    b_only, *_ = _records_run(source="arrays")
+    check("coverage.source = arrays ignores records (counted) and equals the arrays-only belief",
+          snap(b_only) != b"" and b_only.stats["records"] == len(recs)
+          and b_only.stats["pings_covered"] == b_arr.stats["pings_covered"]
+          and mp(b_only)["coverage_source"] == "arrays")
+    b_auto, *_ = _records_run(source="auto", records=False)
+    check("auto without records = arrays, byte for byte (detections-only publishers are unaffected)",
+          snap(b_auto) == snap(b_arr))
+    b_strict, *_ = _records_run(source="records", records=False)
+    check("coverage.source = records with no record: no ping is ever credited",
+          b_strict.stats["pings_covered"] == 0 and mp(b_strict)["coverage_source"] == "records")
+    b_noarr, *_ = _records_run(with_arrays=False)
+    check("records whose arrays never come are applied one record late, and counted",
+          b_noarr.stats["records_without_array"] == len(recs)
+          and b_noarr.stats["pings_covered"] == b_rec.stats["pings_covered"])
+
+    # release bound and the neighbours-only overlap assumption
+    tl = RecordTimeline()
+    tl.add(0.0, 10.0, True)
+    b1 = tl.release_bound
+    tl.add(5.0, 15.0, True)
+    b2 = tl.release_bound
+    ok3 = tl.add(10.0, 20.0, True)                                      # t_min(2) == t_max(0): allowed
+    check("release bound: nothing after one record, then strictly below t_max of the previous record",
+          b1 == float("-inf") and b2 < 10.0 and close(b2, 10.0) and not ok3 and tl.overlap_ok
+          and close(tl.release_bound, 15.0) and tl.release_bound < 15.0)
+    tl = RecordTimeline()
+    for k in range(2):
+        tl.add(2.5 * k, 10.0 + 2.5 * k, True)
+    broke = tl.add(5.0, 15.0, True)                                     # 75 % overlap: t_min(2) < t_max(0)
+    check("an image overlapping more than its neighbours is reported once; the bound falls back to t_min",
+          broke and not tl.overlap_ok and tl.release_bound < 5.0 and close(tl.release_bound, 5.0)
+          and not tl.add(7.5, 17.5, True))
+    check("covered(tau): inside a searched span only", tl.covered(0.0) and tl.covered(17.5)
+          and not tl.covered(17.6) and not tl.covered(-0.1))
+    tl2 = RecordTimeline()
+    tl2.add(0.0, 10.0, False)
+    tl2.add(5.0, 15.0, True)
+    check("an unsearched image covers nothing; its searched neighbour covers the overlap",
+          not tl2.covered(2.0) and tl2.covered(7.0) and tl2.covered(12.0))
+
+    # evidence horizon: everything at or before the header stamp has been applied
+    b_live, pings_l, arrays_l, _ = _records_run(finish=False, stop_after=150.0)
+    stamp = to_grid_dict(b_live, 1)["header"]["stamp"]
+    fed = [p for p in pings_l if p.t + 0.01 <= 150.0]
+    check("header.stamp is the evidence horizon: every ping at or before it is in the grid, none after",
+          stamp == b_live.last_event_t and b_live.stats["pings"] == sum(1 for p in fed if p.t <= stamp)
+          and 0 < b_live.stats["pings"] < len(fed), f"horizon {stamp:.2f} s, fed to {fed[-1].t:.2f} s")
+    lag = fed[-1].t - stamp
+    stride = 2.135 / 0.5
+    check("release latency is between one and two image strides behind the newest ping",
+          stride * 0.9 <= lag <= 2.0 * stride + 1.0 + 0.1, f"lag {lag:.2f} s, stride {stride:.2f} s")
+
+    # the wire format: one verbatim record from a real Perception log
+    raw = (ROOT / "test" / "data" / "image_record_real.json").read_text(encoding="utf-8")
+    rec = ad.record_from_msg(SimpleNamespace(data=raw))
+    check("a real Perception record parses: key, row span, searched, dummy, calibrated",
+          rec is not None and rec.key == "gcs-20261028T025627Z-9e70/10" and rec.t_min < rec.t_max
+          and rec.searched and rec.dummy and rec.calibrated is False and rec.detector == "dummy_center"
+          and rec.near_range_mask_m == 0.0, f"{rec.t_max - rec.t_min:.3f} s span" if rec else "")
+    d = json.loads(raw)
+    same = ad.record_from_msg({"data": raw}) == rec == ad.record_from_msg(d) == ad.record_from_msg(raw)
+    d2 = dict(d, detections=None)
+    d2["processing"] = dict(d["processing"], detector=dict(d["processing"]["detector"], status="no_pixels"))
+    check("String message, key access, decoded dict and raw text agree; detections: null -> not searched",
+          same and ad.record_from_msg(d2).searched is False)
+    check("another schema, or no time span, is refused (None), never raised",
+          ad.record_from_msg(dict(d, schema="blueboat_perception/image_record/2")) is None
+          and ad.record_from_msg(dict(d, time={"t_min_s": None, "t_max_s": None})) is None
+          and ad.record_from_msg("{not json") is None)
+
+
+# ============================================================================ [22] consumer semantics
+def section_consumer() -> None:
+    from blueboat_belief.core.area import area_from_dict
+    from blueboat_belief.core.belief import Belief, Det, DetArray
+    from blueboat_belief.core.config import BeliefConfig
+    from blueboat_belief.core.contract import to_grid_dict
+    from blueboat_belief.core.geometry import processor_side_offsets
+    from blueboat_belief.ros import adapters as ad
+    from test import scenarios as sc
+
+    print("[22] what a consumer may rely on (docs/topics.md §3a; docs/OFFLINE_CORE_API.md)")
+
+    def lawn_run(with_arrays=True):
+        cfg = BeliefConfig().with_values(alignment={"origin_lat": sc.LAT0, "origin_lon": sc.LON0,
+                                                    "override_sigma_m": 0.0})
+        b = Belief(cfg, area_from_dict(sc.area_dict(-10, -30, 110, 60)))
+        pings = sc.lawn(0.0, 0.0, legs=3, spacing=16.0, length=100.0, speed=0.5)
+        arrays = sc.arrays_for(pings, [(30.0, 8.0), (60.0, 24.0), (80.0, -9.0)], period_s=4.27)
+        sc.feed(b, sc.events(pings, sc.odom_for(pings), (), arrays if with_arrays else ()))
+        b.finish()
+        return b, to_grid_dict(b, grid_seq=7)
+
+    b, d = lawn_run()
+    S = b.grid.S
+    inside = b.inside
+    searched_core = (b.grid.searched[:, None] >> np.arange(S)[None, :]) & 1
+    alm = np.asarray(d["aspect_log_miss"]).reshape(-1, S)
+    counts = np.asarray(d["aspect_counts"]).reshape(-1, S)
+    check("aspect_log_miss < 0 is exactly the set of searched sectors that rho is taken against",
+          np.array_equal((alm[inside] < 0), searched_core[inside].astype(bool)))
+    seen_not_searched = int(((counts > 0) & ~(alm < 0))[inside].sum())
+    check("aspect_counts > 0 is a superset: looks without detector coverage are counted there too",
+          bool(np.all((counts[inside] > 0) | ~(alm[inside] < 0))) and seen_not_searched > 0,
+          f"{seen_not_searched} (cell, sector) pairs seen but not searched")
+    b0, d0 = lawn_run(with_arrays=False)
+    a0 = np.asarray(d0["aspect_log_miss"]).reshape(-1, S)
+    c0 = np.asarray(d0["aspect_counts"]).reshape(-1, S)
+    check("no detector at all: every look is counted, no sector is searched, coverage is 0",
+          int((c0[inside] > 0).sum()) > 0 and not bool((a0[inside] < 0).any())
+          and float(np.nanmax(d0["coverage"])) == 0.0)
+
+    # a detection whose class is not configured is kept as "other", and counted
+    cfg = BeliefConfig().with_values(alignment={"origin_lat": sc.LAT0, "origin_lon": sc.LON0})
+    bc = Belief(cfg, area_from_dict(sc.area_dict(-10, -30, 110, 30)))
+    pings = sc.straight_pass(0.0, 0.0, 0.0, 0.5, 60.0)
+    for p in pings[:141]:
+        bc.ingest_ping(p)
+    t = pings[100].t
+    R = np.eye(2)
+    bc.ingest_detections(DetArray(pings[140].t, (Det("1", t, 3.0, 8.0, 0.0, "tyre", 0.8, R),
+                                                 Det("2", t, 12.0, 9.0, 0.0, "shopping_cart", 0.8, R))))
+    for p in pings[141:]:                       # 53 s more with no further array: released at finish
+        bc.ingest_ping(p)
+    bc.finish()
+    check("a detection released long after its row keeps its pose (resolved at arrival, not at release)",
+          pings[-1].t - t > bc.cfg.pose.buffer_s and bc.counters["no_pose_at_stamp"] == 0
+          and bc.stats["detections"] == 2, f"released {pings[-1].t - t:.0f} s after its row")
+    names = list(bc.cfg.detector.class_names)
+    other = [c for c in bc.contacts.to_dicts(names) if int(np.argmax(c["class_probabilities"])) == names.index("other")]
+    check("a class outside detector.class_names is kept as 'other' and counted, not rejected",
+          bc.stats["detections_class_other"] == 1 and bc.counters["unknown_class"] == 0
+          and len(bc.contacts.contacts) == 2 and len(other) == 1)
+
+    # a known limitation, pinned so that it cannot change unnoticed (MATH §9, after item 10)
+    from blueboat_belief.core.models import logit_scalar
+
+    tb = _table()
+    R1 = np.eye(2) * 1.09
+    c1, _ = tb.add_detection(1.0, 0, 3, 0.4, np.array([5.0, 5.0]), R1, "a", "block", 90.0, 15.0)
+    tb.add_detection(60.0, 0, 9, 0.9, np.array([5.0, 5.0]), R1, "b", "block", 270.0, 5.0)   # same line
+    dd = tb.to_dicts(tuple(names))[0]
+    check("contacts are sequential: a stronger later detection on the same line leaves p_exists at the "
+          "first score, while state and max_confidence follow it",
+          close(c1.L, logit_scalar(0.4)) and int(dd["state"]) == 1 and close(dd["max_confidence"], 0.9, 1e-6)
+          and close(dd["first_confidence"], 0.4, 1e-6) and list(dd["sectors_detected"]) == [3, 9])
+
+    check("processor_side_offsets reproduces the processor (1199 - floor(59.95 h) samples, signed, > lever arm)",
+          processor_side_offsets(2.0, +1).size == 1199 - int(math.floor(59.95 * 2.0))
+          and float(processor_side_offsets(2.0, -1).max()) < -0.285
+          and np.array_equal(processor_side_offsets(2.0, +1), sc.side_offsets(2.0, +1)))
+
+    # the example of docs/OFFLINE_CORE_API.md, run as written
+    doc = (ROOT / "docs" / "OFFLINE_CORE_API.md").read_text(encoding="utf-8")
+    code = doc.split("```python", 1)[1].split("```", 1)[0]
+    ns: dict = {}
+    exec(compile(code, "OFFLINE_CORE_API.md", "exec"), ns)  # noqa: S102 - our own documentation
+    g = ns["grid"]
+    check("docs/OFFLINE_CORE_API.md: the documented example runs and yields a contract dict",
+          g["contract_version"] == "belief_grid/0" and len(g["contacts"]) == 1
+          and float(np.nanmax(g["coverage"])) > 0.5 and bool(g["odom_to_map_valid"]))
+
+    # the run-health surface of docs/OFFLINE_CORE_API.md §5 (Replanner RQ-5): the documented key
+    # sets are exactly the code's, so a consumer can assert "nothing dropped" on named keys
+    import re as _re
+    sec5 = doc.split("## 5. Run health", 1)[1]
+
+    def doc_keys(name):
+        para = sec5.split(f"**`Belief.{name}`**", 1)[1].split("Keys:", 1)[1].split("\n\n", 1)[0]
+        return set(_re.findall(r"`([a-z_]+)`", para))
+
+    hb = ns["belief"]
+    lvl, _msg = hb.health()
+    check("docs/OFFLINE_CORE_API.md §5: counters, stats and summary() keys are exactly the documented ones; "
+          "health() is (level, message)",
+          doc_keys("counters") == set(hb.counters) and doc_keys("stats") == set(hb.stats)
+          and doc_keys("summary()") == set(hb.summary()) and lvl in ("OK", "WARN", "ERROR"),
+          f"counters {sorted(set(hb.counters) ^ doc_keys('counters'))} "
+          f"stats {sorted(set(hb.stats) ^ doc_keys('stats'))} "
+          f"summary {sorted(set(hb.summary()) ^ doc_keys('summary()'))}")
+
+    # the real consumer: BlueBoat-Replanner's own validator, when it is checked out beside us
+    rep = ROOT.parent.parent / "BlueBoat-Replanner" / "blueboat_replanner"
+    if not (rep / "blueboat_replanner" / "core" / "evidence.py").is_file():
+        skip("Replanner contract validator on a real Belief grid", "BlueBoat-Replanner not checked out beside this repo")
+        return
+    old_flag, sys.dont_write_bytecode = sys.dont_write_bytecode, True     # write nothing into its tree
+    sys.path.append(str(rep))
+    try:
+        from blueboat_replanner.core import evidence as r_ev
+        from blueboat_replanner.ros import adapters as r_ad
+
+        def as_rclpy(v):
+            """Scalars as an rclpy message holds them (python types); arrays stay arrays."""
+            if isinstance(v, np.generic):
+                return v.item()
+            if isinstance(v, dict):
+                return {k: as_rclpy(x) for k, x in v.items()}
+            if isinstance(v, list):
+                return [as_rclpy(x) for x in v]
+            return v
+
+        snap = r_ev.validate_grid(r_ad.grid_to_dict(as_rclpy(ad.grid_to_fields(d))))
+        check("the Replanner's validate_grid accepts a real Belief grid with no fallback",
+              snap.fallbacks == () and all(c.fallbacks == () for c in snap.contacts)
+              and snap.coverage.shape == (b.geom.height, b.geom.width)
+              and snap.aspect_counts.shape == (b.geom.height, b.geom.width, S)
+              and len(snap.contacts) == len(d["contacts"]),
+              f"{len(snap.contacts)} contacts, grid {snap.coverage.shape}")
+        cov_r = snap.coverage.ravel()
+        check("it reads the same cells: coverage and NaN mask equal Belief's, cell for cell",
+              np.array_equal(np.isnan(cov_r), ~inside)
+              and np.array_equal(cov_r[inside], np.asarray(d["coverage"], dtype=float)[inside]))
+        try:
+            r_ev.validate_grid(r_ad.grid_to_dict(as_rclpy(ad.grid_to_fields(
+                to_grid_dict(Belief(BeliefConfig(), area_from_dict(sc.area_dict(0, 0, 10, 10))), 1)))))
+            refused = False
+        except r_ev.ContractError:
+            refused = True
+        check("before odom -> map is valid the Replanner refuses the grid (no plan on an unaligned map)", refused)
+    finally:
+        sys.path.remove(str(rep))
+        sys.dont_write_bytecode = old_flag
+
+
 def main() -> int:
     t0 = time.perf_counter()
     for sec in (section_import_sweep, section_config_geo, section_area, section_alignment, section_pose,
                 section_geometry, section_grid, section_contacts, section_render, section_contract,
                 section_layouts, section_adapters, section_determinism, section_localisation,
                 section_rejections, section_performance, section_snapshot, section_packaging,
-                section_bag_replay, section_turns, section_tools):
+                section_bag_replay, section_turns, section_tools, section_records, section_consumer):
         sec()
     print(f"\nALL CHECKS PASSED ({N_CHECKS} checks, {N_SKIPS} skipped, {time.perf_counter() - t0:.1f} s)")
     return 0

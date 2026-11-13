@@ -71,6 +71,7 @@ belief_map:
       sim_check_m: 0.5
     coverage:
       require_detector: true
+      source: "auto"
       max_array_gap_s: 30.0
       wait_s: 60.0
     turn:
