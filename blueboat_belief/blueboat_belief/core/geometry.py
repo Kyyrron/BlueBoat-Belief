@@ -1,8 +1,9 @@
 """Look geometry (docs/MATH.md §1; contract belief_grid/0 C-5).
 
 ENU, yaw psi in radians CCW from East; side s = +1 port, -1 starboard; look bearing
-b = psi + s*pi/2; the processor's signed ground offsets y (port > 0) map to
-p = (x - y sin psi, y + y cos psi) == p + |y| (cos b, sin b).
+b = psi + s*pi/2. A ping is placed from the transducers' point q = (x + a cos psi, y + a sin psi),
+a = its fore/aft arm (``sensor_xy``; MATH §1 item 2). The processor's signed ground offsets y
+(port > 0) then map to p = (q_x - y sin psi, q_y + y cos psi) == q + |y| (cos b, sin b).
 """
 
 from __future__ import annotations
@@ -35,6 +36,12 @@ def sector_of(bearing_rad, n: int, origin_deg: float):
     k = np.floor(a / (360.0 / n)).astype(np.int64)
     k = np.clip(k, 0, n - 1)          # a == 360 - eps rounding
     return int(k) if k.ndim == 0 else k
+
+
+def sensor_xy(x: float, y: float, yaw: float, arm: float):
+    """The transducers' point: the navigation pose (x, y) moved by the fore/aft ``arm`` (+ forward)
+    along the heading (MATH §1 item 2). ``arm = 0`` returns (x, y) unchanged."""
+    return x + arm * math.cos(yaw), y + arm * math.sin(yaw)
 
 
 def sample_xy(x: float, y: float, yaw: float, yoff: np.ndarray):

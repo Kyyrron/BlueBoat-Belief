@@ -39,29 +39,70 @@ For every quantity, §0 gives:
 ## 1. Frames, sides, sectors
 
 These implement contract C-5 (`geometry.py`). Notation:
-- ψ is the boat yaw (rad, ENU, CCW from East), from `ProcessedSSSPing.robot_orientation`;
+- (x, y) is the navigation pose (`ProcessedSSSPing.robot_x`, `robot_y`, odom frame), ψ the boat
+  yaw (rad, ENU, CCW from East), from `ProcessedSSSPing.robot_orientation`;
 - s = +1 is port and s = −1 is starboard;
 - `y_i` are the ping's signed ground offsets (`port_y` > 0, `starboard_y` < 0), measured from
-  base_link with the processor's lever arm (0.285 m) already included;
+  the boat's centre line with the processor's lateral lever arm a_y = 0.285 m already included;
+- `a_x` is the ping's **fore/aft arm**: the transducers' position along the heading from (x, y),
+  + forward. It comes with each ping (`ProcessedSSSPing.transducer_x_offset`, −0.345 m since
+  2026-11-15, adopted from the simulator's profile, not measured), unless
+  `ping.transducer_x_offset_source: config` replaces it by `ping.transducer_x_offset_m` (§1
+  item 7);
 - t = (t_x, t_y) is the odom → map translation (§3).
 
 1. **Look bearing**: `b = ψ + s·π/2`.
-2. **Sample position (map frame)**: `p_i = (x + t_x − y_i sin ψ, y + t_y + y_i cos ψ)`. This is
-   identical to `p + |y_i|·(cos b, sin b)` and to the processor's own geometry. It is implemented
-   by `geometry.sample_xy` and checked in [5].
-3. **Ground range from the transducer** (the PD argument): `r_i = |y_i| − a`, with
-   a = `pd.lever_arm_m` = 0.285.
+2. **Sample position (map frame)**, from the transducers' point
+   `q = (x + a_x cos ψ, y + a_x sin ψ)`:
+   `p_i = (x + t_x + a_x cos ψ − y_i sin ψ, y + t_y + a_x sin ψ + y_i cos ψ)`.
+   This is identical to `q + t + |y_i|·(cos b, sin b)`, and to the processor's own geometry for
+   a_x = 0. It is implemented by `geometry.sensor_xy` then `geometry.sample_xy`, and checked in
+   [5] and [23]. **Closed form** ([23]): one target at (X, Y), seen once heading East and once
+   heading West, each ping emitted when the transducers are abeam (q_x = X). With the arm both
+   samples land at X; placed from (x, y) instead, they land at `X − a_x` and `X + a_x`, i.e.
+   `2|a_x|` apart (0.69 m at a_x = −0.345).
+3. **Ground range from the transducer** (the PD argument): `r_i = |y_i| − a_y`, with
+   a_y = `pd.lever_arm_m` = 0.285.
 4. **Sector**: `k = floor(mod(deg(b) − o, 360) / (360/S))`, with S = `aspect.sector_count` and
    o = `aspect.origin_deg`. It is implemented by `geometry.sector_of` and checked in [5].
    `deg(b) − o` is rounded to 1e-9° before the floor, so a bearing exactly on a sector edge
    lands in the upper sector: `degrees(radians(30))` is 29.999999999999996 in floating point.
 5. **Side of a detection** (`geometry.side_of_point`):
-   `s = sign(cos ψ·(Y − y) − sin ψ·(X − x))`, with (x, y, ψ) the boat pose at the detection's row
-   time. The detection's look sector is `sector_of(ψ + s·π/2)`.
+   `s = sign(cos ψ·(Y − y) − sin ψ·(X − x))`, with (x, y, ψ) the pose at the detection's row
+   time (the transducers' point, §1 item 7; the side is the same from the navigation point). The
+   detection's look sector is `sector_of(ψ + s·π/2)`.
 6. **Cell of a point** (`area.GridGeometry.cell_of`):
    - `col = floor((X − origin_x)/Δ)`, `row = floor((Y − origin_y)/Δ)`;
    - index `i = row·W + col`;
    - row 0 is the south edge.
+7. **Which point each use of a ping pose takes** (owner decision D-12; checked in [23]). The
+   shift `q − (x, y) = a_x·(cos ψ, sin ψ)` is parallel to the heading.
+   - **From the transducers' point q:**
+     - the samples (item 2);
+     - the range of a contact look on a covered ping (§9 item 2);
+     - the pose of a detection (§9 item 0). Its range `r = |(X, Y) − q|` feeds `look_ranges_m`
+       and the fallback covariance (§10 item 1). The odometry fallback for that pose is moved by
+       the arm of the newest ping.
+   - **Unchanged by the arm, exactly:** the side of a detection (item 5), because
+     `cos ψ·(Y − y − a_x sin ψ) − sin ψ·(X − x − a_x cos ψ) = cos ψ·(Y − y) − sin ψ·(X − x)`. The
+     look bearing and the sector (items 1 and 4) depend on ψ only.
+   - **From the navigation pose (x, y):**
+     - **The turn gate (§4 item 6).** On a rigid body moving forward at v (no side-slip) and
+       turning at ω, the body point (a_x, y) has velocity `(v − ω·y, ω·a_x)` in body axes. Its
+       component along the heading, `v − ω·y`, does not depend on a_x, so the back-scan boundary
+       `|y| = v/|ω|` is the same for the transducers as for the navigation point. Estimated on q,
+       the chord speed would be `√(v² + ω²a_x²)`, which biases r* (+0.17 % at R = 6 m).
+     - **The frozen-pose detector** (`pose.FrozenPoseDetector`, counter `frozen_pose`). It
+       detects a published pose of exactly (0, 0); the transducers' point of such a pose is not
+       (0, 0).
+     - **The odom → map fit (§3).** GPS ↔ odometry pairs, no sonar.
+   - **Re-placing a recording.** `ping.transducer_x_offset_source: config` applies
+     `ping.transducer_x_offset_m` to every ping instead of the message's value. A bag recorded
+     before 2026-11-15 carries 0.0 in the field. It is re-placed with −0.345 m, and reproduced
+     as it was with 0.0.
+   - **Provenance.** `model_params_json.transducer_x_offset` = `{source, min_m, max_m}` over the
+     pings applied so far (`null` before any). The same min and max are in the run summary
+     (`/diagnostics`, manifests).
 
 ## 2. Prior
 
@@ -104,8 +145,9 @@ Implemented by `grid.Grid.observe_ping`; checked in [5] and [6].
    P = 0.7, r_lo = 3 m, r_hi = 25 m, w = 3 m.
 5. `n_pings_j += 1` per (cell, ping), on every released ping, covered or not.
 6. **Turn back-scan gating** (`turn.TurnEstimator`; checked in [19]).
-   - Computed from the poses of processed pings, in time order, over `turn.window_s` (1 s,
-     Perception's `turn_window_s`): `ω = Δψ_unwrapped/Δt` and `v = |Δp|/Δt`.
+   - Computed from the **navigation** poses of processed pings (§1 item 7), in time order, over
+     `turn.window_s` (1 s, Perception's `turn_window_s`): `ω = Δψ_unwrapped/Δt` and
+     `v = |Δp|/Δt`.
    - When `|ω| ≥ turn.min_yaw_rate_rad_s`, the boat is turning: `r* = v/|ω|` (0 below
      `turn.min_speed_mps`), and the inner side is port when ω > 0.
    - Inner-side samples with `|y_i| > r*` are **excluded** from looks, aspects and coverage, and
@@ -329,9 +371,10 @@ the PD model.
 
 Implemented by `contacts.ContactTable`; checked in [7]. π = `detector.base_rate`.
 
-0. **Pose of a detection.** The boat pose at the detection's row time is looked up when the
-   detection **arrives** (`Belief.ingest_detections`), from the ping poses, else from odometry,
-   within `pose.stamp_tolerance_s`. The detection itself is applied later, when it is released
+0. **Pose of a detection.** The transducers' pose (§1 item 7) at the detection's row time is
+   looked up when the detection **arrives** (`Belief.ingest_detections`), within
+   `pose.stamp_tolerance_s`. It comes from the ping poses, each moved by its own arm. Failing
+   that, it comes from odometry moved by the newest ping's arm. The detection itself is applied later, when it is released
    (§8). Looking the pose up at release instead would drop a detection released more than
    `pose.buffer_s` (30 s) after its row, e.g. at shutdown (checked in [22]).
 1. **Association.** Map-frame detection `z`, covariance `R`. Candidates are the contacts with
@@ -342,6 +385,8 @@ Implemented by `contacts.ContactTable`; checked in [7]. π = `detector.base_rate
 2. **Contact looks** follow §5: sector, timeout, epoch.
    - A contact is *observed* by a covered ping whose swath contains the contact's cell.
    - `PD_c*` is the best covered PD at that cell in the look.
+   - The look's range (`look_ranges_m`) is the distance from the transducers' point (§1 item 7)
+     to the contact: at its best detection if it has one, else at its first observing ping.
 3. **Creation look**: `L = logit q*`, with q* the best score in the look (§5 replacement).
 4. **Later detected look**: `L = L_open + ρ_c·(logit q* − logit π)`, with
    `ρ_c = ρ(k | M_c)` against the contact's sectors that had a look.
@@ -379,7 +424,8 @@ Implemented in `contacts.Contact.covariance`; checked in [7] and [13].
 
        Σ = σ_pose²·I + (J_ψ b)(J_ψ b)ᵀ σ_ψ² + R(ψ) diag(σ_along², (σ_across + f·r)²) R(ψ)ᵀ
 
-   where `J_ψ b = r·(−sin b, cos b)`. The sigmas are `uncertainty.*`.
+   where `J_ψ b = r·(−sin b, cos b)`, and r is the range from the transducers' point (§1
+   item 7). The sigmas are `uncertainty.*`.
 2. **Common mode.** `σ_cm` = `contact.common_mode_sigma_m` (Perception's assumed σ_nav, 1 m) is
    shared by all detections. Each observation's independent part is
    `R_ind = R − σ_cm²·I`, floored at `(0.05 m)²·I` (eigenvalue floor).

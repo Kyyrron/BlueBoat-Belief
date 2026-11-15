@@ -1,6 +1,7 @@
 # VALIDATION_REPORT: what was run on the operator laptop, and what it shows
 
-Evidence gathered on 2026-11-12, re-run where stated. Machine: the operator laptop (16 cores, Ubuntu 24.04,
+Evidence gathered on 2026-11-12, and on 2026-11-15 for the fore/aft arm (D-12): §1, §1.1, §2,
+§3.2 and §5.4 were re-run then. Machine: the operator laptop (16 cores, Ubuntu 24.04,
 ROS 2 Jazzy, `rmw_fastrtps_cpp`), `/usr/bin/python3` 3.12.3 with numpy 1.26.4, and the project
 venv `~/ros2_ws/.venv` with numpy 2.4.4.
 
@@ -28,11 +29,14 @@ test/gate.sh            # runs python3 -m test.smoke_test in both environments
 
 | Environment | Result |
 |---|---|
-| A: `~/ros2_ws/.venv/bin/python3`, numpy 2.4.4, rosbags 0.11.9 | **ALL CHECKS PASSED (241 checks, 0 skipped)**, 39.8 s |
-| B: `/usr/bin/python3`, numpy 1.26.4 (what ROS nodes import), rosbags taken from the venv, appended last on the path | **ALL CHECKS PASSED (241 checks, 0 skipped)**, 45.8 s |
+| A: `~/ros2_ws/.venv/bin/python3`, numpy 2.4.4, rosbags 0.11.9 | **ALL CHECKS PASSED (262 checks, 0 skipped)**, 55.1 s |
+| B: `/usr/bin/python3`, numpy 1.26.4 (what ROS nodes import), rosbags taken from the venv, appended last on the path | **ALL CHECKS PASSED (262 checks, 0 skipped)**, 65.2 s |
 
-Last run: 2026-11-12, after the run-health check of `OFFLINE_CORE_API.md` §5 was added to [22],
-with the Replanner's working tree of that evening beside it.
+Last run: 2026-11-15, after the fore/aft arm (D-12, section [23]), with the Replanner checkout
+`f913a41` (clean) beside it. Before the change the same gate gave 241 checks, 0 skipped, in both
+environments. The Replanner's own gate (`/usr/bin/python3 -B -m test.smoke_test` in
+`BlueBoat-Replanner/blueboat_replanner/`), whose sections [20] and [22] drive this core: 278
+passed, 0 failed, 0 skipped, before and after the change; its tree was unchanged.
 
 **What the gate establishes** (sections of `test/smoke_test.py`):
 
@@ -49,15 +53,32 @@ with the Replanner's working tree of that evening beside it.
 | [19], [20] | turn gate; survey-area tool including `--from-mission`; run summary |
 | [21] | image records: first image credited, `null` images not, dummy flag, auto switch, order of array and record irrelevant, release bound, evidence horizon, a verbatim real record |
 | [22] | searched sectors ⟺ `aspect_log_miss < 0`; unknown class counted; a detection released late keeps its pose; the documented offline example runs; the documented run-health keys equal the code's; **the Replanner's own `validate_grid` accepts a real Belief grid** |
+| [23] | the fore/aft arm (D-12). The placement closed form for four headings, and arm 0 gives the navigation pose bit for bit. **One target, an East and a West ping emitted when the transducers are abeam:** the same cell with the arm, and 69 columns of 0.01 m (2\|a\|) apart from the navigation pose. A detection and a missed look abeam at 6 m give look ranges of 6 m, against √(36 + a²) from the navigation pose, with the side unchanged. The odometry fallback. The turn gate drops the same samples with and without the arm, and the transducers' along-heading speed equals v. The frozen pose is detected with the arm. The adapter reads the field, with missing or not-finite giving 0.0. The float32 arm survives CDR. **A 0.0 bag replayed with the configured arm equals a bag carrying it, bit for bit.** Config refusals, the YAML path, and `model_params_json` / `summary()` provenance |
 
 **Limits of level A.** Synthetic inputs. No statement about detector performance, calibration
 or real sonar data follows from it.
+
+### 1.1 Arm 0 changes nothing (D-12)
+
+Snapshots of six fixed scenarios were written from the tree before the change and after it, in
+both environments, and compared member by member. The scenarios: a straight pass, gated with
+records; the lawn of smoke [12], with contacts; the turn of [19]; the bag of [18]; and the
+`b3a_sea_validation` inputs bag, gated and ungated. The script and reports are in
+`~/ros2_ws/sim_runs/sim_acceptance/06_sss_followup_belief/identity/`.
+
+| Compared | Result |
+|---|---|
+| npz members, each scenario, each environment | **33 of 34 byte-identical**: every grid array, `contacts_json`, the header and the scalars |
+| the one that differs, `model_params_json` | only the key `transducer_x_offset` = `{"source": "message", "min_m": 0.0, "max_m": 0.0}` is added; every other key is equal |
+| manifests | added keys only: `config.ping.transducer_x_offset_source`, `config.ping.transducer_x_offset_m`, that model-params key, `summary.transducer_x_offset_min_m` / `_max_m`; no value changed except `npz_sha256` |
+| the b3a replays before the change, against the files stored on 2026-11-12 | byte-identical (`d72850…be9ac` gated, `15f921…d714` ungated): the tree before the change reproduced that day |
 
 ---
 
 ## 2. Level B — build
 
-Built into a scratch workspace, with `~/ros2_ws/install` as a read-only underlay for
+Built into a scratch workspace (2026-11-12, and again on 2026-11-15 for D-12: both packages
+finished in 14.7 s, and nothing was written under `~/ros2_ws/{build,install,log}`), with `~/ros2_ws/install` as a read-only underlay for
 `blueboat_interfaces`, in a shell that had not sourced the venv:
 
 ```bash
@@ -104,27 +125,40 @@ cd ~/ros2_ws/src/BlueBoat-SideScanSonar/BlueBoat-Belief/blueboat_belief
 /usr/bin/python3 -B -m test.ros_graph_check --scenario straight      # also: lawn; --no-records
 ```
 
-It starts the installed `belief_node`, publishes a synthetic survey as real messages on the five
-input topics with the upstream publishers' QoS, and feeds the same messages, after a
-serialisation round trip, to an offline core.
+It starts the `belief_node` found first on the ament prefix path (on 2026-11-15 the scratch
+build of §2 over `~/ros2_ws/install`). It publishes a synthetic survey as real messages on the
+five input topics, with the upstream publishers' QoS, and feeds the same messages, after a
+serialisation round trip, to an offline core. Every ping carries `transducer_x_offset = --arm`
+(default −0.345 m).
+
+Runs of 2026-11-15, against the scratch build with D-12:
 
 | Run | Messages | Result |
 |---|---|---|
-| straight pass, with image records | 2299 (1001 pings, 23 arrays, 23 records) | **ALL ROS CHECKS PASSED (36 checks, 0 failed)** |
-| lawnmower, with image records | 4603 (2002 pings, 49 arrays, 49 records) | 36 / 36 |
-| straight pass, detections only | 2276 | 36 / 36, `coverage.source` = `arrays` |
+| straight pass, with image records, arm −0.345 | 2299 (1001 pings, 23 arrays, 23 records) | **ALL ROS CHECKS PASSED (38 checks, 0 failed)** |
+| lawnmower, with image records, arm −0.345 | 4603 (2002 pings, 49 arrays, 49 records) | 38 / 38 on two reruns; the first attempt 32 / 38 (see below) |
+| straight pass, detections only, arm −0.345 | 2276 | 38 / 38 on a rerun, `coverage.source` = `arrays`; the first attempt 37 / 38 |
+| straight pass, with image records, `--arm 0` (the 2026-11-12 input) | 2299 | 38 / 38 |
 
-What the 36 checks cover:
+**Observed: an endpoint-discovery race in the check, not in the node.** Two of the seven runs
+failed only [R1] lookups, made right after start-up: the node's publishers on `/belief_map/*`
+(6 checks) and its service (1 check) read as "None". [R1] waits for the node's subscriptions, not
+for its publishers. In the same runs [R2]–[R5] passed: the latched grid arrived 35 ms after
+subscribing, the service answered, and every field was equal bit for bit. Every rerun passed
+(`TODO.md` [P2]). On 2026-11-12 the same three scenarios passed 36 / 36 against the installed
+node, before D-12.
+
+What the 38 checks cover:
 
 | Group | Checks |
 |---|---|
 | [R1] | the node runs; one subscription per input topic with the documented reliability; each of our publishers is matched (QoS compatible, CM-4); `belief_grid` offered RELIABLE + TRANSIENT_LOCAL; every output topic and the service with their types; **diagnostics published before any input** (steady-clock timer) |
-| [R2] | every `stats.*` and `rejected.*` value on `/diagnostics` equals the offline core's; no zero-stamp fallback was needed; level OK; coverage source and observed calibration as fed |
-| [R3] | a subscriber created after the run received the last grid **35 ms** after subscribing; `grid_seq` advanced by exactly 1; **all 33 non-contact fields and all 21 fields of every contact equal the offline core's, bit for bit**; `model_params_json`; both display grids; the markers |
+| [R2] | every `stats.*` and `rejected.*` value on `/diagnostics` equals the offline core's; no zero-stamp fallback was needed; level OK; coverage source and observed calibration as fed; **`summary.transducer_x_offset_min_m` = `_max_m` = the published arm** |
+| [R3] | a subscriber created after the run received the last grid **35 ms** after subscribing; `grid_seq` advanced by exactly 1; **all 33 non-contact fields and all 21 fields of every contact equal the offline core's, bit for bit**; `model_params_json`, including `transducer_x_offset`; **the grid differs from a core placing with 0** (equal with `--arm 0`), so the node applied the arm; both display grids; the markers |
 | [R4] | `QueryBelief` around a target equals the core's answer field by field; an invalid radius is answered `ok = false` |
 | [R5] | SIGINT → exit code 0, no traceback; `snapshot_final.npz` **byte-identical** to the offline core's; manifest counters equal |
 
-### 3.3 Launch file, input recording, replay
+### 3.3 Launch file, input recording, replay (2026-11-12, before D-12)
 
 ```bash
 ros2 launch blueboat_belief belief_launch.py area_file:=<W>/area.yaml config:=<W>/params.yaml \
@@ -339,6 +373,52 @@ dropped). The gain walk reaches only `last_intensity_db`, which is display-only.
 
 **Limit.** The dummy detector again: the faults were exercised on the ping path only.
 
+### 5.4 Run a re-placed with the fore/aft arm (offline replay of its inputs, 2026-11-15)
+
+Run a's inputs bag was recorded with the processor of 2026-11-12, which published
+`transducer_x_offset = 0.0` in all 4365 pings, while the simulator rendered every ping from
+0.345 m aft. It is replayed with `ping: {transducer_x_offset_source: config, transducer_x_offset_m:
+0.0 | -0.345}`. Scripts and outputs are in
+`~/ros2_ws/sim_runs/sim_acceptance/06_sss_followup_belief/` (`replay_b3a/`, `tyres/`). The bag was
+only read.
+
+**Whole bag, default configuration, through `cli.replay`:**
+- **0.0**: equal to the 2026-11-12 replay in 33 of 34 npz members; only the added
+  `model_params_json` key differs. It reproduces what the bag gave then.
+- **−0.345**: `n_pings`, `n_looks`, `aspect_counts`, `depth_m` and `last_intensity_db` change in
+  9818 cells. Stats and counters are unchanged. Coverage stays 0, because the detector is the
+  dummy.
+
+**Where each tyre lands.**
+- Method:
+  - each pass is fed separately (East |ψ| < 10°, 1914 pings at y = 0; West |ψ − π| < 10°, 1987
+    pings at y = 12), with every odometry, fix, array and record;
+  - the grid is 0.05 m over x 5–70 m, y 3–9 m, otherwise the default configuration;
+  - the estimator is the power-weighted centroid of the cells of `last_intensity_db` at least
+    max(6 dB, peak − 6 dB) over the row's seabed level, within ±1.95 m of each tyre and
+    y 5.4–6.6 m: session 06's highlight estimator H, applied to Belief's grid.
+- Truth is from the world's `metadata.yaml`, read only by the script.
+- Metres along the East heading, 0 = the true position:
+
+| Tyre | East, arm 0 | West, arm 0 | **Gap, arm 0** | East, arm −0.345 | West, arm −0.345 | **Gap, arm −0.345** |
+|---|---|---|---|---|---|---|
+| (15, 6) | +0.337 | −0.358 | **+0.695** | −0.007 | −0.021 | **+0.015** |
+| (30, 6) | +0.330 | −0.345 | **+0.675** | −0.018 | −0.005 | **−0.013** |
+| (45, 6) | +0.350 | −0.341 | **+0.690** | +0.012 | −0.011 | **+0.023** |
+| (60, 6) | +0.346 | −0.355 | **+0.702** | +0.001 | +0.013 | **−0.012** |
+
+- Before, each pass places a tyre about 0.35 m ahead of the truth along its own heading, and
+  the two headings are 0.68–0.70 m apart. After, each pass is within 0.021 m of the truth and
+  the two headings are at most 0.023 m apart.
+- The GCS measured the same run with its own pictures (session 06): 0.70–0.72 m before,
+  0.01–0.03 m after.
+- **What it shows.** Belief now places the simulator's evidence where the simulator rendered
+  it. The 0.69 m shrinkage is geometry: each pass moves by 0.345 m along its heading. The
+  evidence is that after the change each pass's residual is centimetres.
+- **What it does not show.** The arm on the real boat (`DESIGN.md` L21). Anything about
+  detections: the dummy detector produced none, and Perception does not apply the arm yet
+  (L22).
+
 ---
 
 ## 6. What remains unvalidated
@@ -348,5 +428,8 @@ dropped). The gain walk reaches only `last_intensity_db`, which is display-only.
 | Detections, contacts and negative evidence on real or simulated sonar images | no trained detector exists | Perception: weights, then calibration |
 | `p_exists` as a probability | scores are raw | calibration and its base rate |
 | PD, PFA, ρ | placeholders and an assumed rule | labelled runs; E3 |
+| The installed node with D-12 | `~/ros2_ws/install` was not rebuilt on 2026-11-15 (owner's choice: another session may run a simulation); the ROS check ran against a scratch build | `colcon build --packages-select blueboat_belief_interfaces blueboat_belief`, then `test/ros_graph_check.py` once against it |
+| The fore/aft arm itself | adopted from the simulator's profile, not measured (L21) | the owner's reciprocal-pass measurement on a real recording |
+| Contacts against the grid on opposite passes | Perception does not apply the arm yet (L22, R-8), and no detector is trained | Perception CR-PER-2, then a live run with a detector |
 | Belief on the real boat | no field session with Belief running | a field day with `record_inputs:=true`; real-boat checks L-1, L-2, L-4, L-8 (`TODO.md`) |
 | Belief with the Replanner under ROS | the Replanner drives Belief's offline core in its dev loop (`OFFLINE_CORE_API.md`); its node ran beside `belief_map` once, on an isolated ROS graph with made-up sonar and Control (2026-11-12), never in Gazebo | a Gazebo mission with the Replanner; SSS-Sim `path_source` (Control R-3) for a built world |

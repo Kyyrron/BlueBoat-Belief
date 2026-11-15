@@ -44,7 +44,9 @@ def side_offsets(h: float, side: int, n: int = 1200, length_m: float = 20.0) -> 
 
 def straight_pass(x0: float, y0: float, yaw: float, speed: float, duration: float,
                   t0: float = 100.0, rate: float = 20.0, h: float = 2.0,
-                  pn0: int = 1, db: float = -20.0) -> List[PingObs]:
+                  pn0: int = 1, db: float = -20.0, arm: float = 0.0) -> List[PingObs]:
+    """A straight pass of the navigation point; ``arm`` = the transducers' fore/aft arm each ping
+    carries (``transducer_x_offset``, + forward)."""
     py = side_offsets(h, +1)
     sy = side_offsets(h, -1)
     pdb = np.full(py.size, db, dtype=np.float32)
@@ -57,7 +59,7 @@ def straight_pass(x0: float, y0: float, yaw: float, speed: float, duration: floa
         out.append(PingObs(t=t, x=x0 + d * math.cos(yaw), y=y0 + d * math.sin(yaw), yaw=yaw,
                            water_depth=h + 0.22, port_ping_number=pn0 + i,
                            starboard_ping_number=pn0 + i, port_y=py, port_db=pdb,
-                           starboard_y=sy, starboard_db=sdb))
+                           starboard_y=sy, starboard_db=sdb, transducer_x_offset=arm))
     return out
 
 
@@ -183,7 +185,8 @@ def feed(belief, evs) -> None:
 
 
 def lawn(x0: float, y0: float, legs: int, spacing: float, length: float, speed: float = 1.0,
-         t0: float = 100.0, gap_s: float = 5.0, yaw0: float = 0.0, pn0: int = 1) -> List[PingObs]:
+         t0: float = 100.0, gap_s: float = 5.0, yaw0: float = 0.0, pn0: int = 1,
+         arm: float = 0.0) -> List[PingObs]:
     """Boustrophedon: ``legs`` parallel legs along ``yaw0``, ``spacing`` apart (to the left)."""
     out: List[PingObs] = []
     t = t0
@@ -192,7 +195,7 @@ def lawn(x0: float, y0: float, legs: int, spacing: float, length: float, speed: 
         yaw = yaw0 if i % 2 == 0 else yaw0 + math.pi
         ox = x0 - i * spacing * math.sin(yaw0) + (0 if i % 2 == 0 else length * math.cos(yaw0))
         oy = y0 + i * spacing * math.cos(yaw0) + (0 if i % 2 == 0 else length * math.sin(yaw0))
-        leg = straight_pass(ox, oy, yaw, speed, length / speed, t0=t, pn0=pn)
+        leg = straight_pass(ox, oy, yaw, speed, length / speed, t0=t, pn0=pn, arm=arm)
         out.extend(leg)
         t = leg[-1].t + gap_s
         pn = leg[-1].port_ping_number + 1

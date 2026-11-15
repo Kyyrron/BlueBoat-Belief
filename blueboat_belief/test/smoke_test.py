@@ -1170,7 +1170,8 @@ def _write_bag(ts, path: Path, evs) -> None:
                      "port_ping_number": o.port_ping_number, "starboard_ping_number": o.starboard_ping_number,
                      "robot_x": o.x, "robot_y": o.y,
                      "robot_orientation": {"z": math.sin(o.yaw / 2), "w": math.cos(o.yaw / 2)},
-                     "water_depth": o.water_depth, "port_intensity_db": o.port_db, "port_y": o.port_y,
+                     "water_depth": o.water_depth, "transducer_x_offset": o.transducer_x_offset,
+                     "port_intensity_db": o.port_db, "port_y": o.port_y,
                      "starboard_intensity_db": o.starboard_db, "starboard_y": o.starboard_y}
             elif kind == "odom":   # zero stamp, as on the real launch: the log time is used
                 f = {"pose": {"pose": {"position": {"x": o.x, "y": o.y},
@@ -1372,8 +1373,9 @@ def section_tools() -> None:
     check("area_cumulative_pd = 1 - sum pi_i Q_i (uniform pi) = mean in-area coverage",
           abs(b.area_cumulative_pd() - pk) < 1e-9 and 0 < pk < 1, f"P = {pk:.4f}")
     s = b.summary()
-    check("summary: cumulative PD, contacts, confirmed, retired, alignment",
-          set(s) == {"area_cumulative_pd", "contacts", "contacts_confirmed", "contacts_retired", "alignment_valid"})
+    check("summary: cumulative PD, contacts, confirmed, retired, alignment, range of the fore/aft arms",
+          set(s) == {"area_cumulative_pd", "contacts", "contacts_confirmed", "contacts_retired", "alignment_valid",
+                     "transducer_x_offset_min_m", "transducer_x_offset_max_m"})
 
 
 # ============================================================================ [21] image records
@@ -1679,13 +1681,258 @@ def section_consumer() -> None:
         sys.dont_write_bytecode = old_flag
 
 
+# ============================================================================ [23] fore/aft arm
+ARM = -0.345                   # the processor's TRANSDUCER_X_OFFSET_M since 2026-11-15 (adopted)
+
+
+def _one_ping(t, x, y, yaw, port_y, pn, arm):
+    """A ping with a single port sample (starboard absent)."""
+    from blueboat_belief.core.belief import PingObs
+
+    e = np.zeros(0, np.float32)
+    return PingObs(t, x, y, yaw, 2.22, pn, 0, np.array([port_y], np.float32),
+                   np.array([0.0], np.float32), e, e, arm)
+
+
+def section_arm() -> None:
+    from blueboat_belief.core.area import area_from_dict
+    from blueboat_belief.core.belief import Belief, Det, DetArray, OdomObs, PingObs
+    from blueboat_belief.core.config import BeliefConfig, ConfigError, load_yaml
+    from blueboat_belief.core.contract import to_grid_dict
+    from blueboat_belief.core.geometry import sample_xy, sensor_xy
+    from blueboat_belief.io.snapshot import encode_npz
+    from blueboat_belief.ros import adapters as ad
+    from test import scenarios as sc
+
+    print("[23] fore/aft arm: evidence placed from the transducers' point (MATH §1 items 2, 7; CR-BEL-1)")
+    # -- closed form of the placement
+    yoff = np.array([2.0, -3.5, 17.25])
+    ok, exact0 = True, True
+    for yaw in (0.0, math.radians(37.0), math.pi, math.radians(-120.0)):
+        c, s_ = math.cos(yaw), math.sin(yaw)
+        for a in (ARM, 0.25):
+            px, py = sample_xy(*sensor_xy(10.0, 20.0, yaw, a), yaw, yoff)
+            ok &= bool(np.allclose(px, 10.0 + a * c - yoff * s_, rtol=0, atol=1e-12)
+                       and np.allclose(py, 20.0 + a * s_ + yoff * c, rtol=0, atol=1e-12))
+        exact0 &= sensor_xy(10.0, 20.0, yaw, 0.0) == (10.0, 20.0) and sensor_xy(-3.5, 0.0, yaw, 0.0) == (-3.5, 0.0)
+    check("p_i = (x + a cos psi - y_i sin psi, y + a sin psi + y_i cos psi) for four headings", ok)
+    check("arm 0: the transducers' point is the navigation pose, bit for bit (the old placement)", exact0)
+
+    base = BeliefConfig().with_values(coverage={"require_detector": False},
+                                      alignment={"origin_lat": sc.LAT0, "origin_lon": sc.LON0,
+                                                 "override_sigma_m": 0.0})
+    as_zero = {"transducer_x_offset_source": "config", "transducer_x_offset_m": 0.0}
+
+    # -- one target, an East and a West pass, each ping emitted when the TRANSDUCERS are abeam
+    X, Y, res = 30.0025, 6.0025, 0.01
+    area_p = area_from_dict(sc.area_dict(28, 5, 32, 7))
+
+    def two_passes(ping_cfg):
+        b = Belief(base.with_values(grid={"resolution_m": res}, ping=ping_cfg), area_p)
+        b.ingest_ping(_one_ping(100.0, X - ARM, 0.0, 0.0, Y, 1, ARM))                # East: q = x + a
+        b.ingest_ping(_one_ping(200.0, X + ARM, 12.005, math.pi, 12.005 - Y, 2, ARM))  # West: q = x - a
+        b.finish()
+        hit = np.flatnonzero(b.grid.n_pings)
+        return b, hit
+    b, hit = two_passes({})
+    target = int(b.geom.cell_of(X, Y))
+    check("with the arm both passes land in the target's cell (n_pings 2 there, nowhere else)",
+          list(hit) == [target] and int(b.grid.n_pings[target]) == 2, f"cells {[int(h) for h in hit]}, target {target}")
+    b0, hit0 = two_passes(as_zero)
+    cols = sorted(int(h) % b0.geom.width for h in hit0)
+    rows = {int(h) // b0.geom.width for h in hit0}
+    check("placed from the navigation pose they are 2|a| apart: 69 columns of 0.01 m, one row",
+          len(hit0) == 2 and cols[1] - cols[0] == round(2 * abs(ARM) / res) and rows == {target // b0.geom.width},
+          f"columns {cols}")
+
+    # -- the range of a look: a detection and a missed look, both abeam the transducers at 6 m
+    Xc, Yc = 30.5, 6.0
+    area_c = area_from_dict(sc.area_dict(20, -5, 40, 20))
+    py_full, sy_full = sc.side_offsets(2.0, +1), sc.side_offsets(2.0, -1)
+    dbp, dbs = np.full(py_full.size, -20, np.float32), np.full(sy_full.size, -20, np.float32)
+
+    def looks(ping_cfg, odom_fallback=False):
+        b = Belief(base.with_values(grid={"resolution_m": 1.0}, ping=ping_cfg), area_c)
+        east = PingObs(100.0, Xc - ARM, 0.0, 0.0, 2.22, 1, 1, py_full, dbp, sy_full, dbs, ARM)
+        if odom_fallback:          # no ping near the row: the pose comes from odometry
+            for i in range(11):
+                b.ingest_odom(OdomObs(99.5 + 0.1 * i, Xc - ARM, 0.0, 0.0))
+            b.ingest_ping(PingObs(**{**east.__dict__, "t": 110.0, "x": 0.5, "y": 0.5}))
+        else:
+            b.ingest_ping(east)
+        b.ingest_detections(DetArray(t=110.0 if odom_fallback else 100.0,
+                                     detections=(Det("1", 100.0, Xc, Yc, 0.0, "block", 0.8, np.eye(2) * 1.09),)))
+        if not odom_fallback:
+            b.ingest_ping(PingObs(200.0, Xc + ARM, 12.0, math.pi, 2.22, 2, 2, py_full, dbp, sy_full, dbs, ARM))
+        b.finish()
+        (c,) = b.contacts.contacts.values()
+        return c, b
+    c, b = looks({})
+    r = [lk.range_m for lk in c.looks]
+    d = b.contacts.to_dicts(b.cfg.detector.class_names)[0]
+    check("a detection and a later missed look abeam the transducers at 6 m: both look ranges are 6 m",
+          len(r) == 2 and all(abs(v - 6.0) < 1e-9 for v in r) and c.looks[0].detected
+          and not c.looks[1].detected and list(d["sectors_missed"]) == [9], f"ranges {r}")
+    c0, _ = looks(as_zero)
+    r0 = [lk.range_m for lk in c0.looks]
+    check("from the navigation pose they would be sqrt(36 + a^2); the side (first sector 3) is the same",
+          all(abs(v - math.hypot(6.0, ARM)) < 1e-9 for v in r0) and c.first_sector == c0.first_sector == 3,
+          f"ranges {r0}")
+    cf, _ = looks({}, odom_fallback=True)
+    cf0, _ = looks(as_zero, odom_fallback=True)
+    check("odometry fallback of a detection pose: moved by the newest ping's arm (6 m), else sqrt(36 + a^2)",
+          abs(cf.looks[0].range_m - 6.0) < 1e-9 and abs(cf0.looks[0].range_m - math.hypot(6.0, ARM)) < 1e-9,
+          f"{cf.looks[0].range_m:.6f}, {cf0.looks[0].range_m:.6f}")
+
+    # -- the turn gate keeps the navigation pose
+    arc = _arc()
+    w, v = 1.0 / 6.0, 1.0
+    along, speed = [], []
+    for p0, p1 in zip(arc[10:20], arc[11:21]):
+        q0, q1 = sensor_xy(p0.x, p0.y, p0.yaw, ARM), sensor_xy(p1.x, p1.y, p1.yaw, ARM)
+        dt, ym = p1.t - p0.t, 0.5 * (p0.yaw + p1.yaw)
+        vx, vy = (q1[0] - q0[0]) / dt, (q1[1] - q0[1]) / dt
+        along.append(vx * math.cos(ym) + vy * math.sin(ym))
+        speed.append(math.hypot(vx, vy))
+    check("rigid body: the transducers move along the heading at v, their speed is sqrt(v^2 + w^2 a^2)",
+          max(abs(u - v) for u in along) < 1e-4
+          and max(abs(u - math.hypot(v, w * ARM)) for u in speed) < 1e-4,
+          f"along {along[0]:.6f}, speed {speed[0]:.6f}")
+    area_t = area_from_dict(sc.area_dict(-30, -30, 30, 40))
+    runs = {}
+    for a in (0.0, ARM):
+        bt = Belief(base, area_t)
+        for p in arc:
+            bt.ingest_ping(PingObs(**{**p.__dict__, "transducer_x_offset": a}))
+        runs[a] = bt
+    st0, st1 = runs[0.0].stats, runs[ARM].stats
+    check("turn gate: the same back-scanned pings and samples with and without the arm (r* unchanged)",
+          st0["backscan_pings"] == st1["backscan_pings"] > 0 and st0["backscan_samples"] == st1["backscan_samples"]
+          and not np.array_equal(runs[0.0].grid.n_looks, runs[ARM].grid.n_looks),
+          f"{st1['backscan_pings']} pings, {st1['backscan_samples']} samples; placement differs")
+
+    # -- the frozen-pose detector reads the published pose
+    bf = Belief(BeliefConfig(), area_from_dict(sc.area_dict(-10, -40, 110, 40)))
+    p0 = sc.straight_pass(0.0, 0.0, 0.7, 1.0, 1.0, arm=ARM)[0]
+    for i in range(25):
+        bf.ingest_ping(PingObs(**{**p0.__dict__, "t": 100.0 + i / 20.0, "x": 0.0, "y": 0.0}))
+    check("frozen pose: 25 pings at (0, 0) with the arm -> 6 rejected, health ERROR",
+          bf.counters["frozen_pose"] == 6 and bf.health()[0] == "ERROR")
+    bn = Belief(base, area_t)
+    bn.ingest_ping(PingObs(**{**p0.__dict__, "transducer_x_offset": float("nan")}))
+    bc = Belief(base.with_values(ping={"transducer_x_offset_source": "config", "transducer_x_offset_m": ARM}), area_t)
+    bc.ingest_ping(PingObs(**{**p0.__dict__, "transducer_x_offset": float("nan")}))
+    check("a non-finite arm in a PingObs is nan_input, unless the configured arm replaces it",
+          bn.counters["nan_input"] == 1 and bc.counters["nan_input"] == 0 and bc.stats["pings"] == 1)
+
+    # -- adapter: the field is read; missing or not finite -> 0.0
+    msg = {"port_stamp": {"sec": 5, "nanosec": 0}, "starboard_stamp": {"sec": 5, "nanosec": 0},
+           "port_ping_number": 3, "starboard_ping_number": 3, "robot_x": 1.0, "robot_y": 2.0,
+           "robot_orientation": {"x": 0, "y": 0, "z": 0, "w": 1}, "water_depth": 2.0,
+           "port_y": [1.0], "port_intensity_db": [-1.0], "starboard_y": [], "starboard_intensity_db": []}
+    got = [ad.ping_from_msg({**msg, "transducer_x_offset": ARM})[0].transducer_x_offset,
+           ad.ping_from_msg(SimpleNamespace(**msg, transducer_x_offset=ARM))[0].transducer_x_offset,
+           ad.ping_from_msg(msg)[0].transducer_x_offset]
+    bad = [ad.ping_from_msg({**msg, "transducer_x_offset": v})[0].transducer_x_offset
+           for v in (float("nan"), float("inf"), None, "x")]
+    check("adapter: transducer_x_offset read by key and attribute; missing, NaN, inf, None -> 0.0",
+          got == [ARM, ARM, 0.0] and bad == [0.0] * 4, f"{got} {bad}")
+
+    # -- configuration: the switch and the value
+    for badv in ({"ping": {"transducer_x_offset_source": "msg"}}, {"ping": {"transducer_x_offset_m": float("inf")}},
+                 {"ping": {"transducer_x_offset_m": "x"}}):
+        try:
+            BeliefConfig.from_dict(badv)
+            refused = False
+        except ConfigError:
+            refused = True
+        check(f"refused: {badv}", refused)
+    with tempfile.TemporaryDirectory() as tmp:
+        f = Path(tmp) / "old_recording.yaml"
+        f.write_text("ping:\n  transducer_x_offset_source: config\n  transducer_x_offset_m: -0.345\n")
+        ly = load_yaml(str(f))
+    check("the cli/replay --config path: a YAML file selects the configured arm",
+          ly.ping.transducer_x_offset_source == "config" and ly.ping.transducer_x_offset_m == ARM)
+
+    # -- provenance: model_params_json and the run summary
+    bp = Belief(base, area_t)
+    mp_before = json.loads(to_grid_dict(bp, 1)["model_params_json"])["transducer_x_offset"]
+    sm = bp.summary()
+    for p in sc.straight_pass(-20.0, 0.0, 0.0, 1.0, 2.0, arm=ARM):
+        bp.ingest_ping(p)
+    mp_after = json.loads(to_grid_dict(bp, 1)["model_params_json"])["transducer_x_offset"]
+    check("model_params_json.transducer_x_offset: null before any ping, then source and min = max = arm; "
+          "the same in summary()",
+          mp_before == {"source": "message", "min_m": None, "max_m": None}
+          and math.isnan(sm["transducer_x_offset_min_m"]) and math.isnan(sm["transducer_x_offset_max_m"])
+          and mp_after == {"source": "message", "min_m": ARM, "max_m": ARM}
+          and bp.summary()["transducer_x_offset_min_m"] == bp.summary()["transducer_x_offset_max_m"] == ARM,
+          json.dumps(mp_after))
+
+    # -- recorded inputs: the field from a bag, and a recording made before 2026-11-15 re-placed
+    if not importlib.util.find_spec("rosbags"):
+        skip("the arm through CDR and bag replay", "rosbags not installed")
+        return
+    from blueboat_belief.cli.replay import replay
+
+    ts = _typestore()
+    arm32 = float(np.float32(ARM))            # what a float32 message field holds
+    pm = materialize(ts, "blueboat_interfaces/msg/ProcessedSSSPing", {
+        "port_stamp": ad.s_to_stamp(100.0), "starboard_stamp": ad.s_to_stamp(100.0),
+        "port_ping_number": 1, "starboard_ping_number": 1, "robot_x": 1.0, "robot_y": 2.0,
+        "robot_orientation": {"w": 1.0}, "water_depth": 2.2, "transducer_x_offset": ARM,
+        "port_intensity_db": dbp, "port_y": py_full, "starboard_intensity_db": dbs, "starboard_y": sy_full})
+    pb = ts.deserialize_cdr(ts.serialize_cdr(pm, "blueboat_interfaces/msg/ProcessedSSSPing"),
+                            "blueboat_interfaces/msg/ProcessedSSSPing")
+    check("ProcessedSSSPing CDR round trip: the float32 arm reaches PingObs",
+          ad.ping_from_msg(pb)[0].transducer_x_offset == arm32, repr(ad.ping_from_msg(pb)[0].transducer_x_offset))
+    area18 = area_from_dict(sc.area_dict(-10, -40, 110, 60))
+    pings0 = sc.lawn(0, 0, 2, 18.0, 60.0)
+    pingsA = sc.lawn(0, 0, 2, 18.0, 60.0, arm=arm32)
+    arrays = sc.arrays_for(pings0, [(25.0, 9.0), (40.0, 27.0)])
+    fixes = [f.__class__(t=f.t + 0.002, lat=f.lat, lon=f.lon, status=f.status) for f in sc.fixes_for(pings0)]
+
+    def evs(pings):
+        return sc.events(pings, sc.odom_for(pings), fixes, arrays)
+
+    def grid_bytes(b):
+        d = to_grid_dict(b, 1)
+        mp = json.loads(d.pop("model_params_json"))
+        return encode_npz(d), mp
+    direct = Belief(BeliefConfig(), area18)
+    sc.feed(direct, [(a_, o, k, OdomObs(a_, x.x, x.y, x.yaw) if k == "odom" else x) for a_, o, k, x in evs(pingsA)])
+    direct.finish()
+    ref, ref_mp = grid_bytes(direct)
+    cfg_old = BeliefConfig().with_values(ping={"transducer_x_offset_source": "config", "transducer_x_offset_m": arm32})
+    with tempfile.TemporaryDirectory() as tmp:
+        bagA, bag0 = Path(tmp) / "with_arm", Path(tmp) / "before_2026_11_15"
+        _write_bag(ts, bagA, evs(pingsA))
+        _write_bag(ts, bag0, evs(pings0))
+        rA = Belief(BeliefConfig(), area18)
+        replay(str(bagA), rA, [str(ROOT / "test" / "msg_reference")])
+        rO = Belief(cfg_old, area18)
+        replay(str(bag0), rO, [str(ROOT / "test" / "msg_reference")])
+        r0 = Belief(BeliefConfig(), area18)
+        replay(str(bag0), r0, [str(ROOT / "test" / "msg_reference")])
+    gA, mpA = grid_bytes(rA)
+    gO, mpO = grid_bytes(rO)
+    g0, _ = grid_bytes(r0)
+    check("a bag whose pings carry the arm replays = direct feeding (grid and contacts bit for bit)",
+          gA == ref and mpA == ref_mp and mpA["transducer_x_offset"] == {"source": "message", "min_m": arm32, "max_m": arm32})
+    check("a bag recorded with 0.0, replayed with the configured arm, equals it bit for bit (source: config)",
+          gO == gA and mpO["transducer_x_offset"] == {"source": "config", "min_m": arm32, "max_m": arm32})
+    check("the same 0.0 bag with the default (the message) gives the old placement, which differs",
+          g0 != gA and len(direct.contacts.contacts) == len(rO.contacts.contacts) == 2)
+
+
 def main() -> int:
     t0 = time.perf_counter()
     for sec in (section_import_sweep, section_config_geo, section_area, section_alignment, section_pose,
                 section_geometry, section_grid, section_contacts, section_render, section_contract,
                 section_layouts, section_adapters, section_determinism, section_localisation,
                 section_rejections, section_performance, section_snapshot, section_packaging,
-                section_bag_replay, section_turns, section_tools, section_records, section_consumer):
+                section_bag_replay, section_turns, section_tools, section_records, section_consumer,
+                section_arm):
         sec()
     print(f"\nALL CHECKS PASSED ({N_CHECKS} checks, {N_SKIPS} skipped, {time.perf_counter() - t0:.1f} s)")
     return 0

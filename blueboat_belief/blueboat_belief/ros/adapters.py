@@ -69,9 +69,21 @@ def _seq(v: Any) -> list:
     return [] if v is None else list(v)
 
 
+def _finite_or_zero(v: Any) -> float:
+    """A float field that may be absent, None or not finite: 0.0 then."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return f if math.isfinite(f) else 0.0
+
+
 # ---------------------------------------------------------------------------- inputs
 def ping_from_msg(msg: Any, arrival_t: float = 0.0) -> Tuple[PingObs, bool]:
-    """``blueboat_interfaces/ProcessedSSSPing`` -> (PingObs, zero_stamp_used_arrival)."""
+    """``blueboat_interfaces/ProcessedSSSPing`` -> (PingObs, zero_stamp_used_arrival).
+
+    ``transducer_x_offset`` (the transducers' fore/aft arm, docs/MATH.md §1 item 7) is carried
+    over; a missing or non-finite value is 0.0."""
     pp = int(get(msg, "port_ping_number", 0))
     sp = int(get(msg, "starboard_ping_number", 0))
     t = stamp_to_s(get(msg, "port_stamp")) if pp != 0 else stamp_to_s(get(msg, "starboard_stamp"))
@@ -86,7 +98,8 @@ def ping_from_msg(msg: Any, arrival_t: float = 0.0) -> Tuple[PingObs, bool]:
                    port_ping_number=pp, starboard_ping_number=sp,
                    port_y=_f32(get(msg, "port_y")), port_db=_f32(get(msg, "port_intensity_db")),
                    starboard_y=_f32(get(msg, "starboard_y")),
-                   starboard_db=_f32(get(msg, "starboard_intensity_db"))), used_arrival
+                   starboard_db=_f32(get(msg, "starboard_intensity_db")),
+                   transducer_x_offset=_finite_or_zero(get(msg, "transducer_x_offset", 0.0))), used_arrival
 
 
 def odom_from_msg(msg: Any, arrival_t: float = 0.0) -> Tuple[OdomObs, bool]:

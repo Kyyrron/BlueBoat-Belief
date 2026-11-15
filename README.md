@@ -67,7 +67,7 @@ planner reads.
 
 | Input | Owner | What Belief takes from it |
 |---|---|---|
-| `/sss_processor/processed` (`ProcessedSSSPing`, BEST_EFFORT) | BlueBoat-SSS `sss_processor_node` | per ping: the boat pose, the water depth, signed ground offsets and intensities per side |
+| `/sss_processor/processed` (`ProcessedSSSPing`, BEST_EFFORT) | BlueBoat-SSS `sss_processor_node` | per ping: the boat pose, the transducers' fore/aft arm (`transducer_x_offset`: the samples are placed from the transducers' point, `docs/MATH.md` §1), the water depth, signed ground offsets and intensities per side |
 | `/sss_ai/detections` (`Detection2DArray`, RELIABLE) | BlueBoat-Perception | one array per seabed image: detections with score ≥ 0.10, positioned in odom |
 | `/sss_ai/image_records` (JSON, optional) | BlueBoat-Perception | per image: its row time span, whether a real detector ran on pixels, and the calibration flag |
 | `/blueboat/odom` | BlueBoat-Control (real) / SSS-Sim bridge (Gazebo) | poses for the odom → map fit |
@@ -261,7 +261,8 @@ Evidence levels are kept apart (`docs/VALIDATION_REPORT.md`):
 | Level | Result |
 |---|---|
 | Offline gate (`test/gate.sh`) | green in both Python environments of the laptop, 0 skipped |
-| ROS 2 Jazzy, isolated domain | built into `~/ros2_ws/install`; the published grid equals the offline core bit for bit; QoS, latch, service, exit codes and the final snapshot checked |
+| ROS 2 Jazzy, isolated domain | built into `~/ros2_ws/install`; the published grid equals the offline core bit for bit; QoS, latch, service, exit codes and the final snapshot checked. The fore/aft arm (2026-11-15) was checked against a scratch build; the shared install predates it until rebuilt |
+| Fore/aft arm | with an arm of 0 nothing moves; on a re-placed simulated run the four tyres' two opposite passes went from 0.68–0.70 m apart to ≤ 0.023 m (`docs/VALIDATION_REPORT.md` §5.4); the arm itself is adopted, not measured |
 | Real recording | one real harbour leg through the real sonar processor: every ping applied, alignment from real GPS (4 mm spread) |
 | Live Gazebo, dummy detector | every ping applied beside the real processor, GCS and Perception; image records used; zero coverage, correctly; the fault-injection profile changed nothing |
 | Consumer | the Replanner drives Belief's offline core in its dev loop, and its validator accepts a real Belief grid (gate [22]); the Replanner's node ran beside `belief_map` on an isolated ROS graph with made-up sonar and Control (2026-11-12) |

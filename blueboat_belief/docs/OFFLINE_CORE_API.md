@@ -41,6 +41,7 @@ cfg = BeliefConfig().with_values(
 belief = Belief(cfg, area)
 
 h = 2.0                                              # transducer altitude above the seabed [m]
+arm = -0.345                                         # transducers' fore/aft arm from (x, y), + forward [m]
 port, stbd = processor_side_offsets(h, +1), processor_side_offsets(h, -1)
 db_p = np.full(port.size, -20.0, dtype=np.float32)   # intensities are display-only
 db_s = np.full(stbd.size, -20.0, dtype=np.float32)
@@ -51,7 +52,8 @@ for i in range(2001):                                # 20 pings per second for 1
     x = speed * (t - t0)
     belief.ingest_ping(PingObs(t=t, x=x, y=0.0, yaw=yaw, water_depth=h + 0.22,
                                port_ping_number=i + 1, starboard_ping_number=i + 1,
-                               port_y=port, port_db=db_p, starboard_y=stbd, starboard_db=db_s))
+                               port_y=port, port_db=db_p, starboard_y=stbd, starboard_db=db_s,
+                               transducer_x_offset=arm))
     if i == 800:                                     # a detection 8 m to port of this ping
         det = Det(id="1", t_row=t, x=x, y=8.0, theta=yaw, class_name="block", score=0.8,
                   cov=np.array([[1.09, 0.0], [0.0, 1.09]]))
@@ -72,10 +74,15 @@ belief.
 2. **Frames.** `PingObs.x, y, yaw` and `Det.x, y` are in the odom frame (ENU metres, yaw in
    radians counter-clockwise from East). With the alignment override above, the odom frame is
    the map frame. Without it, feed `OdomObs` and `FixObs` and wait for `odom_to_map_valid`.
-3. **Ping geometry.** `port_y > 0`, `starboard_y < 0`, near to far, measured from the boat's
-   centre line: they already contain the 0.285 m lever arm. `water_depth` is the altitude plus
-   0.22 m; a `water_depth` of exactly 0.22 means "altitude unknown" and the row is dropped. A
-   side is absent when its `*_ping_number` is 0.
+3. **Ping geometry.** `PingObs.x, y` are the navigation pose. `port_y > 0`, `starboard_y < 0`,
+   near to far, measured from the boat's centre line: they already contain the 0.285 m lateral
+   lever arm. `transducer_x_offset` (the last field, default 0.0) is the transducers' fore/aft
+   arm from (x, y) along the heading, + forward: the processor's `ProcessedSSSPing.transducer_x_offset`,
+   −0.345 m since 2026-11-15. Belief places the samples from `(x + a cos yaw, y + a sin yaw)`
+   (`MATH.md` §1 items 2 and 7). With the default 0.0 a caller's placement is the one it had before
+   the field existed. `water_depth` is the altitude plus 0.22 m; a `water_depth` of exactly 0.22
+   means "altitude unknown" and the row is dropped. A side is absent when its `*_ping_number` is
+   0.
 4. **Ping rate.** One look of a cell is a run of pings from one aspect sector with gaps of at
    most `look.timeout_s` (20 s). Pings must therefore be denser than that along a pass. They do
    not have to be 20 Hz: a 0.5 m cell needs at least one ping while the swath crosses it, so keep
@@ -149,9 +156,11 @@ Keys: `pings`, `pings_covered`, `pings_geometry_only`, `arrays`, `detections`,
 
 **`Belief.summary()`**: `dict`, run-level numbers. `area_cumulative_pd` is Bourgault 2006 Eq. 7
 for one target uniform in the area (a planning aid, `MATH.md` §13 item 5).
+`transducer_x_offset_min_m` and `transducer_x_offset_max_m` are the range of the fore/aft arms
+the applied pings were placed with (NaN before any ping); equal values mean one arm.
 
 Keys: `area_cumulative_pd`, `contacts`, `contacts_confirmed`, `contacts_retired`,
-`alignment_valid`.
+`alignment_valid`, `transducer_x_offset_min_m`, `transducer_x_offset_max_m`.
 
 **`Belief.health()`**: `(level, message)`, with level `"OK"`, `"WARN"` (odom → map not valid
 yet, the simulator anchor check failed, or observations were dropped before alignment) or

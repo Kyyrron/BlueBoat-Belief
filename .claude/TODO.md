@@ -27,7 +27,10 @@ Done items are removed, not kept. What has been run is in
      becomes `other`; DESIGN O-1);
   2. run `test/live_sim_check.py` with it (Gazebo + GCS + Perception + Belief);
   3. compare contacts with the world's objects **offline**: localisation error, ellipse
-     coverage, share of pings credited (`stats.pings_covered / pings`).
+     coverage, share of pings credited (`stats.pings_covered / pings`);
+  4. on two opposite passes over one object, compare each contact with the grid evidence of the
+     same pass. Since D-12 the grid is placed from the transducers' point; until Perception
+     applies the arm (`docs/REQUESTS.md` R-8) a contact sits 0.345 m along-track from it.
 
 ## [P1]
 
@@ -49,6 +52,11 @@ recorded (`record_inputs:=true`).
 - **L-8 Frozen (0, 0) ping poses.** Count `/sss_processor/processed` rows with
   `robot_x == robot_y == 0`; Belief's `frozen_pose` must match and `/diagnostics` must report
   ERROR.
+- **L-9 The fore/aft arm on the wire.** On the first real launch with Belief, read
+  `/diagnostics` `summary.transducer_x_offset_min_m` / `_max_m`: both must be the processor's
+  value (−0.345 m today). 0.0 means a processor installed before 2026-11-15
+  (`colcon build --packages-select blueboat_sss`). The value itself is adopted, not measured
+  (`DESIGN.md` L21).
 
 ### Turn gate on straight lines
 - Live in Gazebo the gate acted through the half turn as intended, and also on about one ping in
@@ -76,6 +84,13 @@ recorded (`record_inputs:=true`).
   Belief grid.
 
 ## [P2]
+
+### ROS runtime check: endpoint-discovery race in [R1]
+- `test/ros_graph_check.py` [R1] waits until the node's five subscriptions are discovered, then
+  looks up its publishers and service at once. On 2026-11-15 two of seven runs failed those
+  lookups (6 and 1 checks, "None"), while [R2]–[R5] of the same runs passed. The reruns passed
+  38/38 (`VALIDATION_REPORT.md` §3.2).
+- Fix: wait (same 20 s bound) for the `/belief_map/*` publishers and the service too.
 
 ### Replace placeholders with fitted models
 - PD(r) with confidence intervals (Nguyen & Murdoch 2012 is a precedent, record only), PFA at

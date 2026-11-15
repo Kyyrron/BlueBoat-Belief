@@ -26,6 +26,7 @@ Owner decisions; the IDs are cited in code and docs.
 | D-9 | Bearing-resolved ρ is a TODO, not built, so `belief_grid/0` stays stable | — |
 | D-10 | Image records are an optional companion input, read for detector coverage only; the array heuristic stays the fallback (`coverage.source: auto`) | `core/coverage.RecordTimeline`, `Belief.ingest_record` |
 | D-11 | `rosbags` lives in the project venv; the gate runs in the venv and on the system numpy | `test/gate.sh` |
+| D-12 | Ping evidence is placed from the transducers' point, with the fore/aft arm each ping carries (`transducer_x_offset`; CR-BEL-1, 2026-11-15). The turn gate, the frozen-pose detector and the alignment keep the navigation pose (§3 item 10). `ping.transducer_x_offset_source: config` re-places a recording | `core/belief.py`, `core/geometry.sensor_xy` |
 | Q-1 | `BeliefGrid` is TRANSIENT_LOCAL depth 1 **and** republished at 1 Hz | `ros/belief_node.py` |
 | Q-3 | Per-sector miss accounting (`aspect_log_miss`) is published | `core/grid.py` |
 | Q-4 | Synthetic inputs live only in `test/`; no ground-truth reader in Belief | `test/scenarios.py` |
@@ -106,6 +107,31 @@ its order dependence beyond two looks stated (`MATH.md` §7); the sequential con
    GPS-converted corners put the grid origin 1e-9 m off its round value.
 9. **Unknown altitude.** `water_depth == 0.22` is the processor's "no altitude" sentinel, and its
    offsets are then slant range. Those rows are dropped, not credited (owner Q-11).
+10. **Which point each use of a ping pose takes (D-12; `MATH.md` §1 item 7; smoke [23]).** The
+    transducers sit `a_x` along the heading from the navigation pose (−0.345 m: aft). Ignored, the
+    error flips with the heading: one object seen on two opposite passes lands `2|a_x|` = 0.69 m
+    apart, more than a target's size (0.5–0.7 m), which is what association and revisit aiming
+    rely on.
+
+    | Use | Point | Why |
+    |---|---|---|
+    | samples (looks, misses, PD, intensity, depth) | transducers | where the sonar was |
+    | a contact look's range on a covered ping (`look_ranges_m`) | transducers | the range at which the sonar saw the cell, from the same point as the samples |
+    | the pose of a detection: side, bearing, range, fallback covariance | transducers | side and bearing are exactly unchanged (the shift is parallel to the heading); the range then means the same for detected and missed looks. It differs from the navigation point's by at most `a_x²/2r` (0.024 m at 2.5 m, 0.006 m at 10 m) |
+    | odometry fallback of a detection pose | odometry moved by the newest ping's arm | consistent with the ping poses |
+    | turn gate (ω, v, r*) | navigation pose | the along-heading velocity of every body point (a_x, y) is `v − ω·y`, whatever a_x, so `r* = v/\|ω\|` is the same; the transducers' chord speed `√(v² + ω²a_x²)` would bias it |
+    | frozen-pose detector | navigation pose (the message's x, y) | it detects a published (0, 0); the transducers' point of such a pose is not (0, 0) |
+    | odom → map fit | navigation pose | GPS ↔ odometry pairs, no sonar |
+
+    - Detections are taken as Perception places them; Belief does not correct them. Perception
+      does not apply the arm yet (L22).
+    - The arm comes with every ping, and Belief hard-codes none. A recording made before
+      2026-11-15 carries 0.0 (the processor of that time) even when the simulator rendered it from
+      −0.345 m. It is re-placed by a configuration value, not by a code path:
+      `ping: {transducer_x_offset_source: config, transducer_x_offset_m: -0.345}` (and 0.0
+      reproduces the old placement).
+    - With an arm of 0 every grid array and contact is identical to the placement before D-12
+      (`VALIDATION_REPORT.md` §1.1); `model_params_json.transducer_x_offset` states the arm.
 
 ## 4. Known limitations (state them; do not hide them)
 
@@ -131,6 +157,8 @@ its order dependence beyond two looks stated (`MATH.md` §7); the sequential con
 | L18 | Perception's near-range slant mask (`near_range_mask_m`, 0 by default) is reported, not modelled | near-range coverage would be over-credited if the mask exceeded the altitude | apply the record's searched range per side |
 | L19 | `/diagnostics`, the grid and the displays are paced by wall time. In a slowed simulation they are published more often per simulated second | bandwidth only | — |
 | L20 | The detector's classes must be listed in `detector.class_names`; anything else becomes `other` (counted, and the node warns once) | a consumer that keys its model on the class | set the list from the trained model |
+| L21 | The fore/aft arm (−0.345 m) is the simulator's value, adopted, not measured. On the real boat it counts from the navigation fix, which depends on where the GPS sits (the pool corpus read −0.60 m with the GPS near the bow) | real-boat placement along the heading, ±0.3 m | the owner's measurement (reciprocal passes over a point target, session 06 CR-OWN-1); then the processor's default |
+| L22 | Perception's detections are not yet placed from the transducers' point (its CR-PER-2): a contact sits \|a_x\| along-track from the grid evidence of the same pass, and two opposite passes' detections are 2\|a_x\| apart | contact positions, association margin (gate 2 m), revisit aiming | Perception CR-PER-2 (`REQUESTS.md` R-8); Belief then needs no change |
 
 ## 5. Scientific status of each component
 
@@ -149,6 +177,7 @@ need. Read status of every source: `REFERENCES.md`.
 | Detector coverage | a ping counts only where a detector that ran spans it | owner Q-7 and D-10; brief §17.9 | on a live run with a real detector | share of pings credited, live |
 | Turn gate | inner-side samples beyond `r* = v/\|ω\|` add nothing | Paull 2013 §II-C (read); radius as Perception uses it (Cobra 1992, record) | the 1 s estimator lag; behaviour on straight lines | a real run with its own time base |
 | odom → map | median of GPS − odom pairs, latched; yaw 0 | real odom yaw is absolute ENU (`robot_interface.py`) | on a real run (L-1) | compass against odom yaw on a run bag |
+| Sample placement | from the transducers' point, with each ping's fore/aft arm (D-12) | rigid-body geometry; the arm adopted from the simulator's profile (L21) | the arm on the boat | reciprocal passes over a point target on a real recording with a live clock |
 
 **What Belief can claim today.** Its equations are implemented as specified and reproduce
 closed forms; the node publishes what the core computes; a replay is deterministic. **What it

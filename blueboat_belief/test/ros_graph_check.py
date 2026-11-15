@@ -13,7 +13,11 @@ Run it from ``blueboat_belief/`` with the system python (the one the node uses),
 where ``ROS_DOMAIN_ID`` is set and is not 0 and where Belief's packages are sourced::
 
     /usr/bin/python3 -B -m test.ros_graph_check [--scenario straight|lawn] [--rate 250]
-                                                [--attach] [--no-records] [--work DIR]
+                                                [--attach] [--no-records] [--work DIR] [--arm A]
+
+``--arm`` is the fore/aft arm every published ping carries in ``transducer_x_offset`` (default
+-0.345 m, the processor's since 2026-11-15; ``--arm 0`` is the 2026-11-12 run). The node must
+place the pings with it, as the offline core does (docs/MATH.md §1 item 7).
 
 ``--attach`` expects a node that is already running (started by the launch file, for the
 ``record_inputs`` check) and leaves it running. Exit codes: 0 pass, 1 a check failed,
@@ -61,6 +65,8 @@ def main(argv=None) -> int:
     ap.add_argument("--attach", action="store_true", help="use a node that is already running")
     ap.add_argument("--no-records", action="store_true", help="publish no image records")
     ap.add_argument("--work", default="", help="work directory (default: a temporary one)")
+    ap.add_argument("--arm", type=float, default=-0.345,
+                    help="transducer_x_offset of every published ping [m] (default -0.345)")
     args = ap.parse_args(argv)
 
     domain = os.environ.get("ROS_DOMAIN_ID", "")
@@ -110,12 +116,17 @@ def main(argv=None) -> int:
         params_file.write_text(yaml.safe_dump({"belief_map": {"ros__parameters": overrides}}))
     cfg = BeliefConfig.from_dict(overrides)
     ref = Belief(cfg, area_from_dict(area_d))
+    # the same messages placed with an arm of 0: the node must match ``ref``, not this one (unless
+    # the published arm is 0 itself)
+    ref0 = Belief(cfg.with_values(ping={"transducer_x_offset_source": "config", "transducer_x_offset_m": 0.0}),
+                  area_from_dict(area_d))
+    arm32 = float(np.float32(args.arm))         # what the float32 message field carries
 
     if args.scenario == "straight":
-        pings = sc.straight_pass(0.0, 0.0, 0.0, 1.0, 50.0)
+        pings = sc.straight_pass(0.0, 0.0, 0.0, 1.0, 50.0, arm=args.arm)
         targets = [(20.0, 9.0), (35.0, -12.0)]
     else:
-        pings = sc.lawn(0.0, 0.0, 2, 18.0, 50.0)
+        pings = sc.lawn(0.0, 0.0, 2, 18.0, 50.0, arm=args.arm)
         targets = [(20.0, 9.0), (35.0, 27.0), (30.0, -8.0)]
     period = 2.135
     arrays = sc.arrays_for(pings, targets, period_s=period)
@@ -136,6 +147,7 @@ def main(argv=None) -> int:
         stamp(m.starboard_stamp, p.t)
         m.port_ping_number, m.starboard_ping_number = int(p.port_ping_number), int(p.starboard_ping_number)
         m.robot_x, m.robot_y, m.water_depth = float(p.x), float(p.y), float(p.water_depth)
+        m.transducer_x_offset = float(p.transducer_x_offset)
         quat(m.robot_orientation, p.yaw)
         m.port_y, m.port_intensity_db = p.port_y.tolist(), p.port_db.tolist()
         m.starboard_y, m.starboard_intensity_db = p.starboard_y.tolist(), p.starboard_db.tolist()
@@ -194,17 +206,18 @@ def main(argv=None) -> int:
     def to_ref(kind: str, msg) -> None:
         """Feed the reference core what the node receives: the message after a wire round trip."""
         w = deserialize_message(serialize_message(msg), type(msg))
-        if kind == "ping":
-            ref.ingest_ping(ad.ping_from_msg(w)[0])
-        elif kind == "dets":
-            ref.ingest_detections(ad.detections_from_msg(w)[0])
-        elif kind == "rec":
-            rec = ad.record_from_msg(w)
-            ref.reject_record() if rec is None else ref.ingest_record(rec)
-        elif kind == "odom":
-            ref.ingest_odom(ad.odom_from_msg(w)[0])
-        else:
-            ref.ingest_fix(ad.fix_from_msg(w)[0])
+        for core in (ref, ref0):
+            if kind == "ping":
+                core.ingest_ping(ad.ping_from_msg(w)[0])
+            elif kind == "dets":
+                core.ingest_detections(ad.detections_from_msg(w)[0])
+            elif kind == "rec":
+                rec = ad.record_from_msg(w)
+                core.reject_record() if rec is None else core.ingest_record(rec)
+            elif kind == "odom":
+                core.ingest_odom(ad.odom_from_msg(w)[0])
+            else:
+                core.ingest_fix(ad.fix_from_msg(w)[0])
 
     # ------------------------------------------------------------------ the graph
     rclpy.init()
@@ -331,6 +344,9 @@ def main(argv=None) -> int:
           diag.get("__level") == 0 and diag.get("coverage.source") == ("arrays" if args.no_records else "records")
           and diag.get("detector.calibrated_observed") == ("None" if args.no_records else "False")
           and "latency.event_age_s" in diag, f"{diag.get('__message')}; source {diag.get('coverage.source')}")
+    lo, hi = diag.get("summary.transducer_x_offset_min_m"), diag.get("summary.transducer_x_offset_max_m")
+    check("diagnostics: the fore/aft arm the node placed the pings with is the published one (min = max)",
+          lo is not None and hi is not None and float(lo) == float(hi) == arm32, f"min {lo}, max {hi}")
 
     # ------------------------------------------------------------------ outputs vs the core
     print("[R3] BeliefGrid (subscribed only now: it must be latched) against the offline core")
@@ -382,9 +398,14 @@ def main(argv=None) -> int:
     check(f"{len(f['contacts'])} contacts, all {len(CONTACT_FIELDS)} fields equal", bool(f["contacts"])
           and len(g.contacts) == len(f["contacts"]) and not cbad, ", ".join(cbad[:6]))
     mp = json.loads(g.model_params_json)
-    check("model_params_json: calibrated false, gated, coverage source as fed",
+    check("model_params_json: calibrated false, gated, coverage source as fed, the published arm",
           mp["detector_calibrated"] is False and mp["negative_evidence"] == "gated"
-          and mp["coverage_source"] == ("arrays" if args.no_records else "records"))
+          and mp["coverage_source"] == ("arrays" if args.no_records else "records")
+          and mp.get("transducer_x_offset") == {"source": "message", "min_m": arm32, "max_m": arm32},
+          json.dumps(mp.get("transducer_x_offset")))
+    same0 = np.array_equal(np.asarray(g.n_pings), to_grid_dict(ref0, 1)["n_pings"])
+    check("the arm reached the placement: the grid differs from a core placing with 0 (equal when --arm 0)",
+          same0 == (arm32 == 0.0), f"arm {arm32:+.4f}, equal to the arm-0 core: {same0}")
     for ch in ("p_target", "coverage"):
         exp = ad.occupancy_fields(d, ch)
         m = occ.get(ch)

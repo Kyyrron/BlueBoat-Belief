@@ -147,15 +147,26 @@ A consumer treats NaN as "no valid belief data", never as 0.
 
 ## 4. Look geometry: how to reproduce a prediction
 
-Notation: ψ is the boat yaw (`ProcessedSSSPing.robot_orientation`, ENU, rad); s = +1 is port and
-−1 is starboard; `y_i` are the ping's signed ground offsets (`port_y` > 0, `starboard_y` < 0).
+Notation: (x, y) is the navigation pose (`ProcessedSSSPing.robot_x`, `robot_y`); ψ is the boat
+yaw (`ProcessedSSSPing.robot_orientation`, ENU, rad); s = +1 is port and −1 is starboard; `y_i` are
+the ping's signed ground offsets (`port_y` > 0, `starboard_y` < 0); `a_x` is the ping's fore/aft
+arm (`ProcessedSSSPing.transducer_x_offset`, + forward).
 
 1. **Look bearing**: `b = ψ + s·π/2`.
-2. **Sample position**: `p_i = (x, y) + |y_i|·(cos b, sin b) + t`, which is the processor's
-   `(x − y_i sin ψ, y + y_i cos ψ)` + t.
-   - `|y_i|` is measured from base_link and already includes the processor's 0.285 m lateral
-     lever arm. Add none.
+2. **Sample position**, from the transducers' point `q = (x, y) + a_x·(cos ψ, sin ψ)`:
+   `p_i = q + |y_i|·(cos b, sin b) + t`, i.e. `(x + a_x cos ψ − y_i sin ψ, y + a_x sin ψ + y_i cos ψ)` + t
+   (`MATH.md` §1 items 2 and 7).
+   - `a_x` comes with each ping: −0.345 m from the processor since 2026-11-15 (the simulator's
+     value, adopted, not measured), 0.0 in recordings made before. Belief hard-codes no arm.
+     `ping.transducer_x_offset_source: config` replaces it by `ping.transducer_x_offset_m` for
+     every ping (re-placing a recording), and `model_params_json.transducer_x_offset` states
+     which arm placed the grid.
+   - `|y_i|` is measured from the boat's centre line and already includes the processor's
+     0.285 m lateral lever arm. Add none.
    - The PD argument is the ground range from the transducer, `|y_i| − 0.285`.
+   - A predictor of where a planned look lands places its swath from the transducers' point too:
+     with the arm aft, a pass's evidence starts and ends |a_x| behind the navigation point. The
+     lateral range of a look does not depend on the arm.
 3. **Sector**: `k = floor(mod(round(deg(b) − aspect_sector_origin_deg, 9), 360) / (360/S))`, on
    the **directed** bearing (0–360°). A bearing on a sector edge goes to the upper sector.
    - Heading East: port looks North (sector 3 of 12), starboard South (sector 9).
@@ -174,7 +185,8 @@ Notation: ψ is the boat yaw (`ProcessedSSSPing.robot_orientation`, ENU, rad); s
      larger confidence first.
    - `"sequential"`: `ln Q = ln Q_open + ln(1 − ρ·PD*)`.
 6a. **Turn back-scan** (`model_params_json.turn_gating`).
-   - From the ping poses over `window_s`: `ω = Δψ/Δt`, `v = |Δp|/Δt`.
+   - From the **navigation** poses of the pings over `window_s` (not the transducers' point:
+     `MATH.md` §1 item 7): `ω = Δψ/Δt`, `v = |Δp|/Δt`.
    - If `|ω| ≥ min_yaw_rate_rad_s`: `r* = v/|ω|` (0 when `v < min_speed_mps`), and the inner side
      is port for ω > 0.
    - Inner-side samples with `|y| > r*` are not counted at all (no look, aspect or coverage).
@@ -213,7 +225,8 @@ image, empty ones included**, as Perception does, or Belief must run ungated.
   PD > 0 that closed without a detection.
 - `first_confidence` and `first_sector` belong to the creating detection.
 - `shadow_known` is false: there is no shadow input yet.
-- Per look: `look_bearings_deg`, `look_ranges_m`, `look_detected`.
+- Per look: `look_bearings_deg`, `look_ranges_m` (from the transducers' point to the contact, at
+  the look's best detection, else at its first observing ping), `look_detected`.
 - `detection_ids` = `"<array stamp ns>:<Detection2D.id>"`, because Perception's ids restart at
   every GCS START.
 
@@ -253,6 +266,8 @@ Each run gets `<root>/data/Belief_data/<YYYY_MM_DD-HH_MM_SS>/`, claimed exclusiv
   - `area_cumulative_pd`: Bourgault 2006 Eq. 7 for one target uniform in the area = the mean
     in-area coverage;
   - `contacts`, `contacts_confirmed`, `contacts_retired`, `alignment_valid`;
+  - `transducer_x_offset_min_m`, `transducer_x_offset_max_m`: the range of the fore/aft arms the
+    applied pings were placed with (`null` before any);
 - `provenance`: wall clock, excluded from determinism checks.
 
 **Survey-area files.** `blueboat-belief-make-area --out <file> --anchor LAT LON --local XMIN
@@ -292,7 +307,8 @@ record that is not readable JSON, has another schema, or has no time span).
 - `backscan_pings`, `backscan_samples`: the turn gate.
 
 `/diagnostics` also carries:
-- `summary.*` (as in the manifest) and `alignment.*`;
+- `summary.*` (as in the manifest; `summary.transducer_x_offset_min_m` / `_max_m` show the arm
+  the live pings carry: 0.0 from a processor installed before 2026-11-15) and `alignment.*`;
 - `detector.calibrated` (configured), `detector.calibrated_observed` and `detector.observed`
   (from the newest image record);
 - `coverage.source`: `records`, `arrays` or `none`;
@@ -311,6 +327,7 @@ offline core bit for bit (checked under ROS by `test/ros_graph_check.py`).
 | names, dtypes, sizes, NaN rules of every field | smoke [9] |
 | `.msg` parse against the field tables, CDR round-trip | smoke [10] |
 | consumer semantics (§3a); the Replanner's own `validate_grid` on a real Belief grid | smoke [22] |
+| the input side: `ProcessedSSSPing.transducer_x_offset` is applied (samples, look ranges, detection poses from the transducers' point) | smoke [23]; `test/ros_graph_check.py` (`--arm`) |
 | endpoints and QoS on a live graph, every published field against the core, query, latch, exit code, final snapshot | `test/ros_graph_check.py` [R1]–[R5] |
 
 **Where Belief departs from the contract text** (all accepted by the owner; consumers need no
@@ -328,8 +345,10 @@ change):
 **`model_params_json` keys** (schema 1): `pd_model`, `pfa`, `rho_model` (`ordering`,
 `fold_opposite`, `independence_angle_deg`), `base_rate`, `look_timeout_s`, `turn_gating`,
 `association`, `alignment_source`, `area`, `negative_evidence` (`gated` / `ungated`),
-`coverage_source` (`records` / `arrays` / `none`), `detector_calibrated` (configured) and
-`detector_calibrated_observed` (newest image record; `null` before one).
+`coverage_source` (`records` / `arrays` / `none`), `detector_calibrated` (configured),
+`detector_calibrated_observed` (newest image record; `null` before one), and
+`transducer_x_offset` (`source`: `message` / `config`; `min_m`, `max_m` over the applied pings,
+`null` before any; added 2026-11-15, additive, schema still 1).
 
 ## 11. Notes for a consumer
 

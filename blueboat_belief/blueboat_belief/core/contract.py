@@ -53,6 +53,7 @@ ADDED_FIELDS = {"area_x", "area_y", "look_detected"}
 
 def model_params(b: Belief) -> dict:
     c = b.cfg
+    lo, hi = b.x_offset_range()
     return {
         "schema": MODEL_PARAMS_SCHEMA,
         "belief_version": __version__,
@@ -77,6 +78,10 @@ def model_params(b: Belief) -> dict:
         "alignment_source": b.aligner.source,
         "association": {"gate_m": c.association.gate_m, "chi2": c.association.chi2},
         "area": {"name": b.area.name, "format": b.area.source_format},
+        # the fore/aft arm the applied pings were placed with (MATH §1 item 7); null before any
+        "transducer_x_offset": {"source": c.ping.transducer_x_offset_source,
+                                "min_m": lo if math.isfinite(lo) else None,
+                                "max_m": hi if math.isfinite(hi) else None},
     }
 
 

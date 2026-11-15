@@ -20,7 +20,7 @@ from .area import FORMAT_WORLD, SurveyArea, grid_for_area
 from .config import BeliefConfig
 from .contacts import ContactTable, valid_covariance
 from .coverage import CoverageTimeline, RecordTimeline
-from .geometry import PORT, STARBOARD, look_bearing, sector_of, side_of_point
+from .geometry import PORT, STARBOARD, look_bearing, sector_of, sensor_xy, side_of_point
 from .grid import Grid
 from .pose import FrozenPoseDetector, PoseBuffer
 from .turn import TurnEstimator
@@ -37,7 +37,7 @@ STAMP_EPS_S = 1e-6               # an array and its image record carry the same 
 @dataclass(frozen=True)
 class PingObs:
     t: float                     # port stamp, else starboard stamp [s]
-    x: float                     # odom frame [m]
+    x: float                     # navigation pose, odom frame [m] (ProcessedSSSPing.robot_x)
     y: float
     yaw: float                   # rad ENU
     water_depth: float
@@ -47,6 +47,9 @@ class PingObs:
     port_db: np.ndarray
     starboard_y: np.ndarray      # (< 0)
     starboard_db: np.ndarray
+    # the transducers' fore/aft arm from (x, y) along the heading, + forward [m]
+    # (ProcessedSSSPing.transducer_x_offset); last and defaulted, so 11-field callers still work
+    transducer_x_offset: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,12 @@ class Belief:
         self.observed_detector = ""
         self.observed_near_range_mask_m = 0.0
         self.turn = TurnEstimator(cfg.turn)
+        # the fore/aft arm (MATH §1 item 7): the newest fed ping's (odometry fallback of a
+        # detection pose), and the range of the arms of the applied pings (provenance)
+        self._newest_x_offset = (cfg.ping.transducer_x_offset_m
+                                 if cfg.ping.transducer_x_offset_source == "config" else 0.0)
+        self._x_offset_lo = math.inf
+        self._x_offset_hi = -math.inf
         self.counters: Dict[str, int] = {r: 0 for r in REASONS}
         self.stats: Dict[str, int] = {"pings": 0, "pings_covered": 0, "pings_geometry_only": 0,
                                       "arrays": 0, "detections": 0, "contacts_created": 0,
@@ -172,16 +181,20 @@ class Belief:
         self._check_alignment()
 
     def ingest_ping(self, p: PingObs) -> None:
-        if not all(math.isfinite(v) for v in (p.t, p.x, p.y, p.yaw, p.water_depth)):
+        a = self._x_offset(p)
+        if not all(math.isfinite(v) for v in (p.t, p.x, p.y, p.yaw, p.water_depth, a)):
             self._count("nan_input")
             return
-        if self.frozen_ping.update(p.x, p.y):
+        if self.frozen_ping.update(p.x, p.y):       # the published pose itself (MATH §1 item 7)
             self._count("frozen_pose")
             return
         if p.t < self.newest_ping_t - self.cfg.look.time_reset_s:
             self._new_epoch()
         self.newest_ping_t = max(self.newest_ping_t, p.t)
-        self.ping_buf.add(p.t, p.x, p.y, p.yaw)
+        # detection poses are the transducers' (MATH §9 item 0): each ping moved by its own arm
+        sx, sy = sensor_xy(p.x, p.y, p.yaw, a)
+        self.ping_buf.add(p.t, sx, sy, p.yaw)
+        self._newest_x_offset = a
         if abs(p.water_depth - self.cfg.ping.unknown_water_depth_m) <= self.cfg.ping.unknown_tol_m:
             self._count("altitude_unknown")
             return
@@ -207,9 +220,29 @@ class Belief:
         self._accept_dets(a, poses)
 
     def _pose_at(self, t: float) -> Optional[Tuple[float, float, float]]:
+        """The transducers' pose at ``t`` (MATH §9 item 0): from the ping poses, each moved by its
+        own arm, else from odometry moved by the newest ping's arm."""
         if not math.isfinite(t):
             return None
-        return self.ping_buf.at(t) or self.odom_buf.at(t)
+        pose = self.ping_buf.at(t)
+        if pose is not None:
+            return pose
+        pose = self.odom_buf.at(t)
+        if pose is None:
+            return None
+        sx, sy = sensor_xy(pose[0], pose[1], pose[2], self._newest_x_offset)
+        return sx, sy, pose[2]
+
+    def _x_offset(self, p: PingObs) -> float:
+        """The fore/aft arm this ping is placed with (MATH §1 item 7): the message's, or the
+        configured one (``ping.transducer_x_offset_source: config``). NaN if it is not a number."""
+        c = self.cfg.ping
+        if c.transducer_x_offset_source == "config":
+            return float(c.transducer_x_offset_m)
+        try:
+            return float(p.transducer_x_offset)
+        except (TypeError, ValueError):
+            return math.nan
 
     def ingest_record(self, r: ImageRec) -> None:
         """One Perception image record (MATH §8.2). Ignored when ``coverage.source`` is
@@ -397,9 +430,14 @@ class Belief:
     def _process_ping(self, p: PingObs, covered: bool) -> None:
         self.stats["pings"] += 1
         self.stats["pings_covered" if covered else "pings_geometry_only"] += 1
-        xm, ym = self.aligner.to_map(p.x, p.y)
+        a = self._x_offset(p)
+        self._x_offset_lo = min(self._x_offset_lo, a)
+        self._x_offset_hi = max(self._x_offset_hi, a)
+        # the samples and the contact-look range start from the transducers' point (MATH §1 item 2)
+        xm, ym = self.aligner.to_map(*sensor_xy(p.x, p.y, p.yaw, a))
         ccells = self._contact_cells() if self.contacts.contacts else {}
         cset = set(ccells.values())
+        # the turn gate keeps the navigation pose: r* = v/|w| is the same for both (MATH §1 item 7)
         _, _, r_star, inner = self.turn.update(p.t, p.x, p.y, p.yaw)
         gate_turn = self.cfg.turn.enabled and inner != 0
         dropped_here = 0
@@ -580,14 +618,23 @@ class Belief:
         cov = self.grid.coverage()[self.inside]
         return float(cov.astype(np.float64).mean()) if cov.size else float("nan")
 
+    def x_offset_range(self) -> Tuple[float, float]:
+        """(min, max) of the fore/aft arms of the pings applied so far; NaN before any."""
+        if self._x_offset_lo > self._x_offset_hi:
+            return math.nan, math.nan
+        return self._x_offset_lo, self._x_offset_hi
+
     def summary(self) -> Dict[str, float]:
         """Run-level numbers for /diagnostics and the snapshot manifest (not contract fields)."""
         cs = self.contacts.contacts.values()
+        lo, hi = self.x_offset_range()
         return {"area_cumulative_pd": self.area_cumulative_pd(),
                 "contacts": len(self.contacts.contacts),
                 "contacts_confirmed": sum(1 for c in cs if c.state == 1),
                 "contacts_retired": self.contacts.retired,
-                "alignment_valid": bool(self.aligner.valid)}
+                "alignment_valid": bool(self.aligner.valid),
+                "transducer_x_offset_min_m": lo,
+                "transducer_x_offset_max_m": hi}
 
     def health(self) -> Tuple[str, str]:
         """(level, message) for /diagnostics: ERROR frozen pose; WARN alignment / sim check."""

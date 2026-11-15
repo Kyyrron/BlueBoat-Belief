@@ -50,13 +50,12 @@ consumer is in `topics.md` §10–§11.
   `use_sim_time:=false` on the real boat.
 - **Decides:** owner (Control, add-only).
 
-## R-5 [P2] BlueBoat-SSS: unknown-altitude flag and fore/aft offset
+## R-5 [P2] BlueBoat-SSS: unknown-altitude flag
 
-- **Unknown altitude.** Without a bottom lock the processor publishes `water_depth = 0 + 0.22`
-  and `*_y` = slant range (`sss_processor_node.py:1483-1498`). Belief detects the sentinel and
-  drops the row (`altitude_unknown`). An explicit lock/quality field in `ProcessedSSSPing` (an
-  additive Control type change) would be cleaner.
-- **Fore/aft offset.** `TRANSDUCER_X_OFFSET_M` is 0.0. Belief inherits the processor's geometry.
+- **What.** Without a bottom lock the processor publishes `water_depth = 0 + 0.22` and `*_y` =
+  slant range (`sss_processor_node.py:1483-1498`). An explicit lock/quality field in
+  `ProcessedSSSPing` (an additive Control type change) would be cleaner.
+- **Belief meanwhile.** It detects the sentinel and drops the row (`altitude_unknown`).
 - **Decides:** owner (SSS; Control for the message).
 
 ## R-6 [P2] Status gate for MCS SimGps fixes (noted, not Belief's)
@@ -74,3 +73,17 @@ Belief follows the rule.
 - **`sss_processor_node.py`** ends with a traceback and exit code −2 on the double SIGINT of
   `ros2 launch`, after publishing every row (`VALIDATION_REPORT.md` §4).
 - **Decides:** owner (SSS).
+
+## R-8 [P1] Perception: place detections from the transducers' point (its CR-PER-2)
+
+- **What.** Detection positions computed from the seabed picture's georef with its fore/aft arm
+  (`georef.lever_arm_m.x`, convention 3 since 2026-11-15): `pose + R(yaw)·(arm, 0)` before the
+  across-track offset, as the GCS and Belief place the pings.
+- **Why.** Belief places its ping evidence from the transducers' point (`DESIGN.md` D-12) and
+  takes detections as they come. Until Perception applies the arm, a contact sits 0.345 m
+  along-track from the same pass's grid evidence, and two opposite passes' detections of one
+  object are 0.69 m apart (`DESIGN.md` L22). They still associate (gate 2 m), but a contact
+  seen from one heading only is 0.345 m off along that heading.
+- **Belief meanwhile.** No correction: when Perception applies the arm, the detections move by
+  themselves.
+- **Decides:** owner / Perception.

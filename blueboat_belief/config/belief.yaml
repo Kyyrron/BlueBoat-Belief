@@ -61,6 +61,11 @@ belief_map:
     ping:
       unknown_water_depth_m: 0.22
       unknown_tol_m: 0.0001
+      # the transducers' fore/aft arm (docs/MATH.md §1 item 7): "message" = each ping's
+      # transducer_x_offset (-0.345 m from the processor since 2026-11-15); "config" = the value
+      # below for every ping, to re-place a recording (bags made before 2026-11-15 carry 0.0)
+      transducer_x_offset_source: "message"
+      transducer_x_offset_m: 0.0
     alignment:
       window: 200
       min_pairs: 10

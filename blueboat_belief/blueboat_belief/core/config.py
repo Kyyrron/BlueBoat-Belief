@@ -112,6 +112,12 @@ class PoseCfg:
 class PingCfg:
     unknown_water_depth_m: float = 0.22  # processor: altitude 0 (unknown) + 0.22 m submersion
     unknown_tol_m: float = 1e-4
+    # Fore/aft arm of the transducers (MATH §1 item 7; owner 2026-11-15, CR-BEL-1): "message" =
+    # each ping's ProcessedSSSPing.transducer_x_offset; "config" = transducer_x_offset_m for every
+    # ping (re-placing a recording: bags made before 2026-11-15 carry 0.0). Not an installation
+    # value: Belief never hard-codes the arm.
+    transducer_x_offset_source: str = "message"
+    transducer_x_offset_m: float = 0.0   # used only with transducer_x_offset_source: config
 
 
 @dataclass(frozen=True)
@@ -175,6 +181,7 @@ _SECTIONS = {
 
 ORDERINGS = ("sequential", "paull_pairwise")
 COVERAGE_SOURCES = ("auto", "arrays", "records")
+X_OFFSET_SOURCES = ("message", "config")
 
 
 def _coerce(cls, name: str, value: Any, where: str) -> Any:
@@ -329,6 +336,9 @@ def validate(c: BeliefConfig) -> None:
     need(c.contact.dirichlet_alpha0 > 0, "contact.dirichlet_alpha0 must be > 0")
     need(c.pose.stamp_tolerance_s > 0 and c.pose.buffer_s > 0, "pose tolerances must be > 0")
     need(c.pose.frozen_count >= 1, "pose.frozen_count must be >= 1")
+    need(c.ping.transducer_x_offset_source in X_OFFSET_SOURCES,
+         f"ping.transducer_x_offset_source must be one of {X_OFFSET_SOURCES}")
+    need(math.isfinite(c.ping.transducer_x_offset_m), "ping.transducer_x_offset_m must be finite")
     need(c.alignment.window >= 1 and c.alignment.min_pairs >= 1, "alignment window/min_pairs >= 1")
     need(c.alignment.min_pairs <= c.alignment.window, "alignment.min_pairs must be <= window")
     need(c.alignment.queue_max >= 1, "alignment.queue_max must be >= 1")

@@ -39,7 +39,8 @@ dummy detector Belief correctly reports zero coverage.
     - `alignment` (odom→map median fit, latch, override);
     - `pose` (buffer, frozen-pose detector);
     - `models` (prior, PD placeholder, ρ table, miss combination);
-    - `geometry` (look bearing, sector, sample positions, the processor's side offsets);
+    - `geometry` (look bearing, sector, the transducers' point, sample positions, the processor's
+      side offsets);
     - `grid` (looks, misses, per-sector maxima);
     - `contacts` (association, existence, fusion, class);
     - `coverage` (detector coverage: array stamps, or image-record spans);
@@ -87,6 +88,13 @@ dummy detector Belief correctly reports zero coverage.
   - `odom_to_map` = median GPS↔odom translation (yaw 0: odom yaw is absolute ENU), latched.
   - `odom_to_map_valid` is false before that.
   - Observations are queued, bounded, until valid.
+- **Placement from the transducers' point** (D-12, since 2026-11-15). Samples, contact-look
+  ranges and detection poses start at `pose + a·(cos ψ, sin ψ)`, `a` = the ping's
+  `transducer_x_offset` (−0.345 m from the processor; recordings made before 2026-11-15 carry
+  0.0). The turn gate, the frozen-pose detector and the alignment keep the navigation pose.
+  `ping.transducer_x_offset_source: config` + `ping.transducer_x_offset_m` re-place a recording.
+  `model_params_json.transducer_x_offset` and `summary.transducer_x_offset_*` say which arm was
+  applied. Belief hard-codes no arm and does not correct Perception's detections (R-8).
 - **Negative evidence is gated.** A ping counts as searched only where the detector covered it:
   from the image records when they arrive (exact), else from the stamps of `/sss_ai/detections`
   arrays (a heuristic). `coverage.source: auto | arrays | records`.
@@ -155,6 +163,13 @@ python3 -m blueboat_belief.cli.replay <bag folder> --area <world|area.yaml> [--c
 
 ## 6. Status (keep current; replace, do not append)
 - **Offline gate** green in both Python environments (`VALIDATION_REPORT.md` §1).
+- **Fore/aft arm (D-12, 2026-11-15)** applied in the source tree: with an arm of 0 every grid array
+  and contact is identical to before (only the added `model_params_json` key differs). On the
+  re-placed `b3a_sea_validation` recording, the four tyres' East and West passes went from
+  0.68–0.70 m apart to ≤ 0.023 m (`VALIDATION_REPORT.md` §5.4). Run under ROS from a scratch build
+  only: **`~/ros2_ws/install` still holds the node from before D-12** (it places from the
+  navigation pose) until `colcon build --packages-select blueboat_belief_interfaces blueboat_belief`
+  is run.
 - **ROS 2 Jazzy:** built into `~/ros2_ws/install`; on an isolated domain the published grid
   equals the offline core bit for bit; a recorded bag replays to a byte-identical snapshot.
 - **Live in Gazebo** beside the real sonar processor, GCS and Perception (dummy detector): every
