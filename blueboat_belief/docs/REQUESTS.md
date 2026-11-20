@@ -74,16 +74,8 @@ Belief follows the rule.
   `ros2 launch`, after publishing every row (`VALIDATION_REPORT.md` §4).
 - **Decides:** owner (SSS).
 
-## R-8 [P1] Perception: place detections from the transducers' point (its CR-PER-2)
+## R-8 [done] Perception: place detections from the transducers' point (its CR-PER-2)
 
-- **What.** Detection positions computed from the seabed picture's georef with its fore/aft arm
-  (`georef.lever_arm_m.x`, convention 3 since 2026-11-15): `pose + R(yaw)·(arm, 0)` before the
-  across-track offset, as the GCS and Belief place the pings.
-- **Why.** Belief places its ping evidence from the transducers' point (`DESIGN.md` D-12) and
-  takes detections as they come. Until Perception applies the arm, a contact sits 0.345 m
-  along-track from the same pass's grid evidence, and two opposite passes' detections of one
-  object are 0.69 m apart (`DESIGN.md` L22). They still associate (gate 2 m), but a contact
-  seen from one heading only is 0.345 m off along that heading.
-- **Belief meanwhile.** No correction: when Perception applies the arm, the detections move by
-  themselves.
-- **Decides:** owner / Perception.
+- **Done** (Perception `0d55d76`, 2026-11-15; re-checked 2026-11-18 by `~/ros2_ws/sim_runs/perception/handoff_12_cr_per_2.md`: Perception's convention-3 placement matches Belief's `sensor_xy` / `sample_xy` at four headings within 1 mm). Detection positions are computed from the seabed picture's georef with its fore/aft
+  arm (`georef.lever_arm_m.x`, convention 3): `pose + R(yaw)·(arm, 0)` before the across-track offset, as
+  the GCS and Belief place the pings. Belief needed no change (`DESIGN.md` L22 closed).

@@ -27,6 +27,11 @@ dummy detector Belief correctly reports zero coverage.
 - **Docs state the current status only** (owner, 2026-11-12): no session logs, handovers or
   decision histories. Update a document in place; delete what is no longer true.
 
+**Simulated results** follow `../SIM_VALIDITY_CONDITIONS.md` (superproject root; simulator frozen 2026-11-18,
+literal verdict NOT READY, a model-conditional tool). For Belief and Replanner results: a time difference
+inside **±3 % plus 0.6 s per turn** is not a result; simulated position error is up to about **1.1 m right
+after a turn** (0.25 m on straight legs); compare strategies paired (same world, seeds and sea schedule).
+
 ## 1. Layout
 - `blueboat_belief_interfaces/` (ament_cmake): `msg/BeliefGrid.msg`, `msg/BeliefContact.msg`,
   `srv/QueryBelief.srv`. Depends only on `std_msgs` / `builtin_interfaces`. Never add types to
@@ -166,10 +171,8 @@ python3 -m blueboat_belief.cli.replay <bag folder> --area <world|area.yaml> [--c
 - **Fore/aft arm (D-12, 2026-11-15)** applied in the source tree: with an arm of 0 every grid array
   and contact is identical to before (only the added `model_params_json` key differs). On the
   re-placed `b3a_sea_validation` recording, the four tyres' East and West passes went from
-  0.68–0.70 m apart to ≤ 0.023 m (`VALIDATION_REPORT.md` §5.4). Run under ROS from a scratch build
-  only: **`~/ros2_ws/install` still holds the node from before D-12** (it places from the
-  navigation pose) until `colcon build --packages-select blueboat_belief_interfaces blueboat_belief`
-  is run.
+  0.68–0.70 m apart to ≤ 0.023 m (`VALIDATION_REPORT.md` §5.4). `~/ros2_ws/install` holds it
+  (checked 2026-11-18: the installed package equals the source tree, built 2026-11-15).
 - **ROS 2 Jazzy:** built into `~/ros2_ws/install`; on an isolated domain the published grid
   equals the offline core bit for bit; a recorded bag replays to a byte-identical snapshot.
 - **Live in Gazebo** beside the real sonar processor, GCS and Perception (dummy detector): every

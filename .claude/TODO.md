@@ -23,14 +23,15 @@ Done items are removed, not kept. What has been run is in
 - No trained YOLO weights exist; detections, contacts and negative evidence have run on
   synthetic messages only. With the dummy detector Belief correctly shows zero coverage.
 - When a model exists:
-  1. set `detector.class_names` to its classes (the 29 World Builder types; anything unlisted
+  1. set `detector.class_names` to its classes (the World Builder's object set version 2 has 11 classes since
+     2026-11-15; Perception's `yolo_classes_v1` still lists the old 29; anything unlisted
      becomes `other`; DESIGN O-1);
   2. run `test/live_sim_check.py` with it (Gazebo + GCS + Perception + Belief);
   3. compare contacts with the world's objects **offline**: localisation error, ellipse
      coverage, share of pings credited (`stats.pings_covered / pings`);
   4. on two opposite passes over one object, compare each contact with the grid evidence of the
-     same pass. Since D-12 the grid is placed from the transducers' point; until Perception
-     applies the arm (`docs/REQUESTS.md` R-8) a contact sits 0.345 m along-track from it.
+     same pass. Since D-12 the grid is placed from the transducers' point, and since 2026-11-15 Perception
+     places its detections the same way (`docs/REQUESTS.md` R-8, done): they should coincide.
 
 ## [P1]
 
