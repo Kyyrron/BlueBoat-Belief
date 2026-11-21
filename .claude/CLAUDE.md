@@ -193,5 +193,6 @@ python3 -m blueboat_belief.cli.replay <bag folder> --area <world|area.yaml> [--c
 - What ran and what did not: `blueboat_belief/docs/VALIDATION_REPORT.md`.
 - Contract conformance and consumer notes: `docs/topics.md` §10–§11.
 - Scientific status of each component and missing evidence: `docs/DESIGN.md` §5–§6.
-- The README explains the module with its scientific background.
+- The README is a short user guide (build, run, topics, tools); the scientific background is in
+  `docs/DESIGN.md` and `docs/MATH.md`.
 - Superproject: the root `.claude/CLAUDE.md`; skills `module-gates`, `file-interfaces`.
