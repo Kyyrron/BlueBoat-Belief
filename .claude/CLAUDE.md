@@ -64,7 +64,7 @@ after a turn** (0.25 m on straight legs); compare strategies paired (same world,
     environments), `test/ros_graph_check.py` (the ROS runtime check, isolated domain only),
     `test/scenarios.py` (dev-only synthetic inputs), `test/msg_reference/` (verbatim
     `ProcessedSSSPing.msg`, `vision_msgs`), `test/data/` (one real Perception record).
-  - `docs/` (nine files): `MATH` (spec), `topics` (contract, conformance, consumer notes),
+  - `docs/` (eleven files): `USER_GUIDE` and `DEVELOPMENT` (human guides, linked from the README), `MATH` (spec), `topics` (contract, conformance, consumer notes),
     `DESIGN` (decisions, limitations, scientific status, open decisions), `OFFLINE_CORE_API`
     (driving the core without ROS; run health), `SURVEY_AREA_FORMAT`, `REQUESTS` (open needs
     from other modules), `REFERENCES` (read status of every source), `VALIDATION_REPORT` (what
